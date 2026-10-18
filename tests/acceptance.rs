@@ -50,6 +50,15 @@ fn tool_directories() -> Vec<PathBuf> {
     directories
 }
 
+/// `PATH` entries with the real toolchains first and the fixture's `bin`
+/// afterwards, then the system directories.
+fn tool_path_entries(tool_directories: &[PathBuf], fixture_bin: &Path) -> Vec<PathBuf> {
+    let mut directories = tool_directories.to_vec();
+    directories.push(fixture_bin.to_path_buf());
+    directories.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
+    directories
+}
+
 /// `PATH` with the real toolchains first and the fixture's `bin` afterwards.
 ///
 /// [`Fixture::cmd`] only exposes `bin`, `/usr/bin` and `/bin`; a real build
@@ -57,10 +66,7 @@ fn tool_directories() -> Vec<PathBuf> {
 /// toolchains come first so a fixture-local fake tool (`xelatex`, `dot`) never
 /// shadows the real program in the real-build tests.
 fn real_tools_path(f: &Fixture) -> OsString {
-    let mut directories = tool_directories();
-    directories.push(f.path("bin"));
-    directories.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
-    std::env::join_paths(directories).unwrap()
+    std::env::join_paths(tool_path_entries(&tool_directories(), &f.path("bin"))).unwrap()
 }
 
 /// A `texmake` command rooted at the fixture, seeing the real toolchains.
@@ -456,8 +462,14 @@ fn fixture_dot_is_used_when_the_path_has_no_real_tools() {
 #[test]
 fn real_tools_path_prefers_installed_toolchains_over_the_fixture() {
     let f = Fixture::new();
-    let directories: Vec<PathBuf> = std::env::split_paths(&real_tools_path(&f)).collect();
     let fixture_bin = f.path("bin");
+    // The ordering is asserted on synthetic tool directories first, so this
+    // test also guards the invariant on machines without TeX or Graphviz.
+    let synthetic = [
+        PathBuf::from("/synthetic/tex"),
+        PathBuf::from("/synthetic/graphviz"),
+    ];
+    let directories = tool_path_entries(&synthetic, &fixture_bin);
     let bin_index = directories
         .iter()
         .position(|directory| *directory == fixture_bin)
@@ -467,13 +479,38 @@ fn real_tools_path_prefers_installed_toolchains_over_the_fixture() {
         "the fixture bin must not come first: {:?}",
         directories
     );
-    for tool_directory in tool_directories() {
+    assert_eq!(directories.len(), synthetic.len() + 3);
+    for tool_directory in &synthetic {
         let index = directories
+            .iter()
+            .position(|directory| directory == tool_directory)
+            .expect("every tool directory must be on PATH");
+        assert!(
+            index < bin_index,
+            "{} must precede the fixture bin",
+            tool_directory.display()
+        );
+    }
+
+    // The real path must place whatever toolchains exist before `bin` as well.
+    let installed = tool_directories();
+    if installed.is_empty() {
+        eprintln!("skip: no installed toolchains on this machine");
+        return;
+    }
+    let real: Vec<PathBuf> = std::env::split_paths(&real_tools_path(&f)).collect();
+    let real_bin = real
+        .iter()
+        .position(|directory| *directory == fixture_bin)
+        .expect("the fixture bin must be on PATH");
+    assert_eq!(real_bin, installed.len(), "{:?}", real);
+    for tool_directory in installed {
+        let index = real
             .iter()
             .position(|directory| *directory == tool_directory)
             .expect("every tool directory must be on PATH");
         assert!(
-            index < bin_index,
+            index < real_bin,
             "{} must precede the fixture bin",
             tool_directory.display()
         );
