@@ -30,6 +30,11 @@ use crate::engine::Engine;
 use crate::error::usage;
 use crate::init::Language;
 
+/// Labels of the three questions.
+const NAME_PROMPT: &str = "项目名";
+const LANGUAGE_PROMPT: &str = "语言";
+const ENGINE_PROMPT: &str = "引擎";
+
 /// Display labels of the language choices, in the order shown by the prompt.
 const LANGUAGE_ZH: &str = "zh 中文";
 const LANGUAGE_EN: &str = "en English";
@@ -37,6 +42,32 @@ const LANGUAGE_EN: &str = "en English";
 /// Display labels of the engine choices, in the order shown by the prompt.
 const ENGINE_XELATEX: &str = "xelatex";
 const ENGINE_LUALATEX: &str = "lualatex";
+
+/// The language choices, in display order.
+fn language_options() -> [&'static str; 2] {
+    [LANGUAGE_ZH, LANGUAGE_EN]
+}
+
+/// The engine choices, in display order.
+fn engine_options() -> [&'static str; 2] {
+    [ENGINE_XELATEX, ENGINE_LUALATEX]
+}
+
+/// The starting cursor of the language prompt for `default`.
+fn language_cursor(default: Language) -> usize {
+    match default {
+        Language::Zh => 0,
+        Language::En => 1,
+    }
+}
+
+/// The starting cursor of the engine prompt for `default`.
+///
+/// `pdflatex` cannot reach the prompt (`init` rejects it first); it maps to the
+/// first supported choice instead of panicking.
+fn engine_cursor(default: Engine) -> usize {
+    usize::from(default == Engine::Lualatex)
+}
 
 /// The answers collected by `init` in a terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +90,7 @@ pub struct InquirePrompter;
 
 impl Prompter for InquirePrompter {
     fn ask_name(&mut self, default: &str) -> anyhow::Result<String> {
-        Text::new("项目名")
+        Text::new(NAME_PROMPT)
             .with_initial_value(default)
             .with_validator(validate_name)
             .prompt()
@@ -68,12 +99,8 @@ impl Prompter for InquirePrompter {
     }
 
     fn ask_language(&mut self, default: Language) -> anyhow::Result<Language> {
-        let cursor = match default {
-            Language::Zh => 0,
-            Language::En => 1,
-        };
-        let choice = Select::new("语言", vec![LANGUAGE_ZH, LANGUAGE_EN])
-            .with_starting_cursor(cursor)
+        let choice = Select::new(LANGUAGE_PROMPT, language_options().to_vec())
+            .with_starting_cursor(language_cursor(default))
             .prompt()
             .map_err(cancelled)?;
         Ok(if choice == LANGUAGE_ZH {
@@ -84,9 +111,8 @@ impl Prompter for InquirePrompter {
     }
 
     fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine> {
-        let cursor = usize::from(default == Engine::Lualatex);
-        let choice = Select::new("引擎", vec![ENGINE_XELATEX, ENGINE_LUALATEX])
-            .with_starting_cursor(cursor)
+        let choice = Select::new(ENGINE_PROMPT, engine_options().to_vec())
+            .with_starting_cursor(engine_cursor(default))
             .prompt()
             .map_err(cancelled)?;
         Ok(if choice == ENGINE_LUALATEX {
@@ -233,13 +259,95 @@ mod tests {
         let error = error
             .downcast_ref::<Error>()
             .expect("the cancellation is a texmake error");
-        assert!(matches!(error, Error::Usage(message) if message.contains("cancelled")));
+        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
     }
 
     #[test]
-    fn the_name_validator_rejects_blank_names() {
-        assert!(validate_name("").is_err());
-        assert!(validate_name("   ").is_err());
+    fn the_name_validator_accepts_a_normal_name() {
         assert!(matches!(validate_name("thesis"), Ok(Validation::Valid)));
+        assert!(matches!(validate_name("  thesis  "), Ok(Validation::Valid)));
+    }
+
+    #[test]
+    fn the_name_validator_rejects_blank_names_with_a_message() {
+        for blank in ["", "   ", "\t\n"] {
+            let error = match validate_name(blank) {
+                Err(error) => error,
+                Ok(_) => panic!("`{blank:?}` must be rejected"),
+            };
+            assert_eq!(error.to_string(), "项目名不能为空");
+        }
+    }
+
+    fn usage_of(error: anyhow::Error) -> Error {
+        error.downcast::<Error>().expect("a texmake error")
+    }
+
+    #[test]
+    fn cancelled_maps_escape_to_a_usage_error() {
+        let error = usage_of(cancelled(InquireError::OperationCanceled));
+        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn cancelled_maps_ctrl_c_to_a_usage_error() {
+        let error = usage_of(cancelled(InquireError::OperationInterrupted));
+        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn cancelled_maps_end_of_input_to_a_usage_error() {
+        let eof = InquireError::IO(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "end of input",
+        ));
+        let error = usage_of(cancelled(eof));
+        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn collect_stops_after_a_cancelled_name() {
+        let mut prompter = FakePrompter::new();
+        prompter.fail_at = Some("name");
+        let error = collect(&mut prompter, defaults()).expect_err("cancelled");
+        assert_eq!(prompter.calls, ["name"]);
+        assert!(matches!(usage_of(error), Error::Usage(message) if message.contains("cancelled")));
+    }
+
+    #[test]
+    fn collect_stops_after_a_cancelled_language() {
+        let mut prompter = FakePrompter::new();
+        prompter.fail_at = Some("language");
+        let error = collect(&mut prompter, defaults()).expect_err("cancelled");
+        assert_eq!(prompter.calls, ["name", "language"]);
+        assert!(matches!(usage_of(error), Error::Usage(message) if message.contains("cancelled")));
+    }
+
+    #[test]
+    fn the_language_choices_are_zh_then_en() {
+        assert_eq!(language_options(), ["zh 中文", "en English"]);
+    }
+
+    #[test]
+    fn the_engine_choices_are_xelatex_then_lualatex() {
+        assert_eq!(engine_options(), ["xelatex", "lualatex"]);
+    }
+
+    #[test]
+    fn the_starting_cursors_point_at_the_defaults() {
+        assert_eq!(language_cursor(Language::Zh), 0);
+        assert_eq!(language_cursor(Language::En), 1);
+        assert_eq!(engine_cursor(Engine::Xelatex), 0);
+        assert_eq!(engine_cursor(Engine::Lualatex), 1);
+    }
+
+    #[test]
+    fn the_prompt_labels_name_the_questions() {
+        assert_eq!(NAME_PROMPT, "项目名");
+        assert_eq!(LANGUAGE_PROMPT, "语言");
+        assert_eq!(ENGINE_PROMPT, "引擎");
     }
 }
