@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod paths;
 mod recipe;
+mod up_to_date;
 mod validate;
 mod vars;
 

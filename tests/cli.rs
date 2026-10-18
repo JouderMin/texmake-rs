@@ -396,3 +396,166 @@ fn missing_output_directory_without_symlinks_is_allowed() {
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("project: t"));
 }
+
+#[cfg(unix)]
+#[test]
+fn second_build_reports_up_to_date_and_skips_tool() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho \"$@\" >> build/ran.log\n",
+    );
+    let first = f.cmd().output().unwrap();
+    assert_eq!(first.status.code(), Some(0));
+    let second = f.cmd().output().unwrap();
+    assert_eq!(second.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&second.stdout).contains("up to date"));
+    assert_eq!(
+        std::fs::read_to_string(f.path("build/ran.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn touched_source_triggers_rebuild() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho x >> build/ran.log\n",
+    );
+    f.cmd().output().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    f.write("main.tex", "changed");
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(f.path("build/ran.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn deleted_main_with_fresh_pdf_is_config_error() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\n",
+    );
+    f.cmd().output().unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+const FAKE_XELATEX: &str =
+    "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho x >> build/ran.log\n";
+
+fn ran_count(f: &Fixture) -> usize {
+    std::fs::read_to_string(f.path("build/ran.log"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+#[cfg(unix)]
+#[test]
+fn config_mtime_triggers_rebuild() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.cmd().output().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    f.write_toml(
+        "[project]\nname = \"fixture\"\nmain = \"main.tex\"\n\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    assert_eq!(ran_count(&f), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn unrelated_root_file_triggers_rebuild() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.cmd().output().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    f.write("notes.txt", "new");
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    assert_eq!(ran_count(&f), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn file_inside_output_dir_does_not_trigger_rebuild() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.cmd().output().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    f.write("build/extra.txt", "ignored");
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("up to date"));
+    assert_eq!(ran_count(&f), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn git_directory_does_not_trigger_rebuild() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.write(".git/HEAD", "ref: refs/heads/main\n");
+    f.cmd().output().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    f.write(".git/index", "ignored");
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("up to date"));
+    assert_eq!(ran_count(&f), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn force_flag_rebuilds_an_up_to_date_project() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.cmd().output().unwrap();
+    let out = f.cmd().arg("-B").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("up to date"));
+    assert_eq!(ran_count(&f), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn recipe_without_latex_always_runs() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.a]\nsteps = [{ run = \"echo x >> ran.log\" }]\n",
+    );
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    let ran = std::fs::read_to_string(f.path("ran.log")).unwrap();
+    assert_eq!(ran.lines().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_prints_commands_when_up_to_date() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.cmd().output().unwrap();
+    let out = f.cmd().arg("-n").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("-output-directory=build"), "{stdout}");
+    assert!(!stdout.contains("up to date"), "{stdout}");
+    assert_eq!(ran_count(&f), 1);
+}
