@@ -3,4 +3,15 @@ name = "texmake-rs"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "texmake"
+path = "src/main.rs"
+
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
