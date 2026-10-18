@@ -220,3 +220,7 @@ pandoc = "pandoc"
 - 没有 watch 模式，配方之间不能共享公共步骤。
 - 主 PDF 的文件名是主文档名去掉扩展名后加 `.pdf`。
 - 支持 macOS 和 Linux；Windows 为尽力支持。
+
+## 许可证
+
+本项目使用 GNU 通用公共许可证第 3 版发布，SPDX 标识为 `GPL-3.0-only`。完整条款见 [LICENSE](LICENSE)。
