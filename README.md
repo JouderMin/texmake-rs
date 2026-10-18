@@ -25,10 +25,10 @@ texmake clean         # 删除所有配方的输出目录
 `texmake init [dir]` 创建项目，支持以下选项：
 
 - `--name <name>`：项目名。未指定时取目标目录名。目标目录没有目录名（例如 `/`）时报错，并要求用 `--name` 指定。
-- `--engine <pdflatex|xelatex|lualatex>`：生成配方使用的引擎，默认 `xelatex`。
+- `--engine <pdflatex|xelatex|lualatex>`：生成配方使用的引擎，默认 `xelatex`。模板使用 ctex 与 fontsetup，仅支持 `xelatex` 或 `lualatex`；`pdflatex` 会被拒绝。
 - `--language <zh|en>`：生成的 `main.tex` 使用的语言，默认 `zh`。
 
-init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过；同名路径已存在但不是普通文件（例如目录）时报错，且不写任何文件。`--engine pdflatex --language zh` 报错：pdflatex 不能排版中文。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
+init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。中文模板使用 article 文档类与 ctex 宏包，中英文模板都加载 fontsetup 默认选项，需要用 xelatex 或 lualatex 编译。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过；同名路径已存在但不是普通文件（例如目录）时报错，且不写任何文件。`--engine pdflatex` 报错：模板使用 ctex 与 fontsetup，需要 xelatex 或 lualatex。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
 
 ## 配置
 

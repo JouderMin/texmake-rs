@@ -82,9 +82,9 @@ pub struct InitOptions {
 /// `dry_run` no directory or file is created; the planned actions are printed
 /// instead. `quiet` suppresses the progress lines.
 pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
-    if opts.engine == Engine::Pdflatex && opts.language == Language::Zh {
+    if opts.engine == Engine::Pdflatex {
         return Err(usage(
-            "`pdflatex` cannot typeset Chinese; use `--language en` or another engine".to_owned(),
+            "`pdflatex` is not supported: the generated template uses `ctex` and `fontsetup`, which need `xelatex` or `lualatex`".to_owned(),
         ));
     }
 
@@ -160,7 +160,7 @@ fn write_project(
         (
             dir.join("main.tex"),
             "main.tex",
-            main_template(name, opts.language),
+            main_template(opts.language),
         ),
         (dir.join(".gitignore"), ".gitignore", "/build/\n".to_owned()),
     ];
@@ -273,20 +273,22 @@ steps = [
 }
 
 /// The generated `main.tex`.
-fn main_template(name: &str, language: Language) -> String {
-    let (class, body) = match language {
-        Language::Zh => ("ctexart", "你好，世界。"),
-        Language::En => ("article", "Hello, world."),
+fn main_template(language: Language) -> String {
+    let preamble = match language {
+        Language::Zh => "\\usepackage[UTF8]{ctex}\n\\usepackage[default]{fontsetup}",
+        Language::En => "\\usepackage[default]{fontsetup}",
+    };
+    let body = match language {
+        Language::Zh => "你好，世界。",
+        Language::En => "Hello, world.",
     };
     format!(
-        "\\documentclass{{{class}}}
-\\title{{{}}}
+        "\\documentclass{{article}}
+{preamble}
 \\begin{{document}}
-\\maketitle
 {body}
 \\end{{document}}
-",
-        escape_latex(name)
+"
     )
 }
 
@@ -300,24 +302,6 @@ fn escape_toml(name: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-/// Escape LaTeX's special characters so any directory name is typesettable.
-fn escape_latex(name: &str) -> String {
-    let mut escaped = String::with_capacity(name.len());
-    for character in name.chars() {
-        match character {
-            '\\' => escaped.push_str("\\textbackslash{}"),
-            '&' | '%' | '$' | '#' | '_' | '{' | '}' => {
-                escaped.push('\\');
-                escaped.push(character);
-            }
-            '~' => escaped.push_str("\\textasciitilde{}"),
-            '^' => escaped.push_str("\\textasciicircum{}"),
             other => escaped.push(other),
         }
     }
@@ -344,20 +328,18 @@ mod tests {
 
     #[test]
     fn writes_language_specific_documents() {
-        let zh = main_template("论文", Language::Zh);
-        assert!(zh.contains("\\documentclass{ctexart}"));
+        let zh = main_template(Language::Zh);
+        assert!(zh.contains("\\documentclass{article}"));
+        assert!(zh.contains("\\usepackage[UTF8]{ctex}"));
+        assert!(zh.contains("\\usepackage[default]{fontsetup}"));
         assert!(zh.contains("你好，世界。"));
-        assert!(zh.contains("\\title{论文}"));
+        assert!(!zh.contains("ctexart"));
 
-        let en = main_template("paper", Language::En);
+        let en = main_template(Language::En);
         assert!(en.contains("\\documentclass{article}"));
+        assert!(en.contains("\\usepackage[default]{fontsetup}"));
         assert!(en.contains("Hello, world."));
-    }
-
-    #[test]
-    fn escapes_latex_specials_in_the_title() {
-        let main = main_template("a_b&c", Language::En);
-        assert!(main.contains("\\title{a\\_b\\&c}"), "{main}");
+        assert!(!en.contains("ctex"));
     }
 
     fn quiet_options(dir: &Path) -> InitOptions {

@@ -1025,11 +1025,11 @@ fn init_creates_project_files() {
     let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
     assert!(toml.contains("main = \"main.tex\""));
     assert!(toml.contains("xelatex"));
-    assert!(
-        std::fs::read_to_string(f.path("main.tex"))
-            .unwrap()
-            .contains("ctexart")
-    );
+    let main = std::fs::read_to_string(f.path("main.tex")).unwrap();
+    assert!(main.contains("\\documentclass{article}"), "{main}");
+    assert!(main.contains("\\usepackage[UTF8]{ctex}"), "{main}");
+    assert!(main.contains("\\usepackage[default]{fontsetup}"), "{main}");
+    assert!(!main.contains("ctexart"), "{main}");
 }
 
 #[cfg(unix)]
@@ -1058,15 +1058,23 @@ fn init_keeps_existing_main_tex() {
 
 #[cfg(unix)]
 #[test]
-fn init_rejects_pdflatex_with_chinese() {
-    let f = Fixture::new();
-    std::fs::remove_file(f.path("texmake.toml")).unwrap();
-    let out = f
-        .cmd()
-        .args(["init", "--engine", "pdflatex", "--language", "zh"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+fn init_rejects_pdflatex_for_both_languages() {
+    for language in ["zh", "en"] {
+        let f = Fixture::new();
+        std::fs::remove_file(f.path("texmake.toml")).unwrap();
+        let out = f
+            .cmd()
+            .args(["init", "--engine", "pdflatex", "--language", language])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{language}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("pdflatex"), "{err}");
+        assert!(err.contains("ctex"), "{err}");
+        assert!(err.contains("fontsetup"), "{err}");
+        assert!(err.contains("xelatex") && err.contains("lualatex"), "{err}");
+        assert!(!f.path("texmake.toml").exists(), "{language}");
+    }
 }
 
 #[cfg(unix)]
@@ -1149,8 +1157,9 @@ fn init_english_uses_article() {
     assert_eq!(out.status.code(), Some(0));
     let main = std::fs::read_to_string(f.path("main.tex")).unwrap();
     assert!(main.contains("\\documentclass{article}"), "{main}");
+    assert!(main.contains("\\usepackage[default]{fontsetup}"), "{main}");
     assert!(main.contains("Hello, world."), "{main}");
-    assert!(main.contains("paper"), "{main}");
+    assert!(!main.contains("ctex"), "{main}");
 }
 
 #[cfg(unix)]
