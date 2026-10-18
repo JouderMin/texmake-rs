@@ -151,7 +151,15 @@ fn boolean_step_actions_are_required_true() {
     let engines = latex["properties"]["latex"]["enum"]
         .as_array()
         .expect("the latex action must enumerate its engines");
-    let engines: Vec<&str> = engines.iter().filter_map(Value::as_str).collect();
+    let engines: Vec<&str> = engines
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("engine enum item {index} is not a string: {value}"))
+        })
+        .collect();
     assert_eq!(engines, ["pdflatex", "xelatex", "lualatex"]);
 }
 

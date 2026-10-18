@@ -26,7 +26,7 @@
           "type": "string"
         },
         "default": {
-          "description": "默认 recipe 名。",
+          "description": "默认配方名。",
           "type": "string"
         }
       }
