@@ -50,13 +50,15 @@ fn tool_directories() -> Vec<PathBuf> {
     directories
 }
 
-/// `PATH` with the fixture's `bin` first and the real toolchains afterwards.
+/// `PATH` with the real toolchains first and the fixture's `bin` afterwards.
 ///
 /// [`Fixture::cmd`] only exposes `bin`, `/usr/bin` and `/bin`; a real build
-/// needs the TeX installation and Graphviz on `PATH` as well.
+/// needs the TeX installation and Graphviz on `PATH` as well. The installed
+/// toolchains come first so a fixture-local fake tool (`xelatex`, `dot`) never
+/// shadows the real program in the real-build tests.
 fn real_tools_path(f: &Fixture) -> OsString {
-    let mut directories = vec![f.path("bin")];
-    directories.extend(tool_directories());
+    let mut directories = tool_directories();
+    directories.push(f.path("bin"));
     directories.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
     std::env::join_paths(directories).unwrap()
 }
@@ -173,11 +175,21 @@ fn real_draft_rebuild_runs_xelatex_once() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     f.write(
         "main.tex",
         "\\documentclass{article}\n\\begin{document}\nDraft.\n\\end{document}\n",
     );
+    // Make the edited source newer than the PDF without relying on timestamp
+    // granularity or a fixed sleep.
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+    let edited = std::fs::OpenOptions::new()
+        .write(true)
+        .open(f.path("main.tex"))
+        .unwrap();
+    if let Err(error) = edited.set_modified(future) {
+        eprintln!("skip: cannot set the modification time: {error}");
+        return;
+    }
     let out = real_cmd(&f).args(["build", "draft"]).output().unwrap();
     assert_eq!(
         out.status.code(),
@@ -439,4 +451,58 @@ fn fixture_dot_is_used_when_the_path_has_no_real_tools() {
     );
     let log = std::fs::read_to_string(f.path("build/texmake.log")).unwrap();
     assert!(log.contains("$ dot -Tpdf -o graph.pdf"), "{log}");
+}
+
+#[test]
+fn real_tools_path_prefers_installed_toolchains_over_the_fixture() {
+    let f = Fixture::new();
+    let directories: Vec<PathBuf> = std::env::split_paths(&real_tools_path(&f)).collect();
+    let fixture_bin = f.path("bin");
+    let bin_index = directories
+        .iter()
+        .position(|directory| *directory == fixture_bin)
+        .expect("the fixture bin must be on PATH");
+    assert!(
+        bin_index > 0,
+        "the fixture bin must not come first: {:?}",
+        directories
+    );
+    for tool_directory in tool_directories() {
+        let index = directories
+            .iter()
+            .position(|directory| *directory == tool_directory)
+            .expect("every tool directory must be on PATH");
+        assert!(
+            index < bin_index,
+            "{} must precede the fixture bin",
+            tool_directory.display()
+        );
+    }
+}
+
+#[test]
+fn installed_xelatex_is_used_instead_of_a_fixture_shadow() {
+    if !have("xelatex") {
+        eprintln!("skip: xelatex not found");
+        return;
+    }
+    let f = Fixture::new();
+    // If the fixture bin shadowed the real toolchain, this script would run and
+    // fail the build.
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nprintf 'shadow\\n' > shadow-xelatex.out\nexit 1\n",
+    );
+    let out = real_cmd(&f).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !f.path("shadow-xelatex.out").exists(),
+        "the fixture xelatex must not shadow the installed one"
+    );
+    assert!(f.path("build/main.pdf").exists());
 }
