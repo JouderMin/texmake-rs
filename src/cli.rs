@@ -2,14 +2,15 @@
 //!
 //! The CLI shape is the contract later tasks build on: global options are
 //! handled uniformly, and the subcommand variants carry the raw argument
-//! values. `check` validates the configuration; the remaining subcommands are
-//! still stubs that report "not implemented".
+//! values. `check` validates the configuration and `clean` removes the output
+//! directories; only `init` is still a stub that reports "not implemented".
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::build::{self, BuildOptions};
+use crate::clean;
 use crate::config::LoadedConfig;
 use crate::error::Error;
 use crate::recipe;
@@ -122,11 +123,16 @@ fn execute(cli: Cli) -> Result<(), Error> {
             Ok(())
         }
         Some(Command::Build { name }) => build_command(&cli, &loaded, name.as_deref()),
-        Some(Command::Init { .. }) | Some(Command::Clean) => {
-            Err(Error::Usage("not implemented".to_owned()))
-        }
+        Some(Command::Clean) => clean_command(&cli, &loaded),
+        Some(Command::Init { .. }) => Err(Error::Usage("not implemented".to_owned())),
         None => build_command(&cli, &loaded, None),
     }
+}
+
+/// Validate the project and remove every recipe's output directory.
+fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> Result<(), Error> {
+    let project = validate::build_plan(loaded)?;
+    clean::run_clean(&project, cli.dry_run, cli.quiet)
 }
 
 /// Validate the project, select the recipe and run the build.

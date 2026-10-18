@@ -155,7 +155,6 @@ fn resolve_output(root: &Path, output: &str) -> Result<PathBuf, String> {
 ///
 /// Used by `clean`, which must delete parent directories before their children
 /// or simply skip the children.
-#[allow(dead_code)] // consumed by `clean` in a later task
 pub fn dedupe_nested(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths.sort();
     let mut kept: Vec<PathBuf> = Vec::with_capacity(paths.len());

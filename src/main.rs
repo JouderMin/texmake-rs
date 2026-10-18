@@ -5,6 +5,7 @@
 //! project command performs before doing its work.
 
 mod build;
+mod clean;
 mod cli;
 mod config;
 mod error;

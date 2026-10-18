@@ -825,3 +825,139 @@ fn pdf_directory_is_not_up_to_date() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Built"));
     assert_eq!(ran_count(&f), 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_removes_output_dir() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\n",
+    );
+    f.cmd().output().unwrap();
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!f.path("build").exists());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("removed build"));
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_removes_two_outputs_and_nested_parent_only() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.a]\noutput = \"out\"\nsteps = [{ latex = \"xelatex\" }]\n\
+         [recipes.b]\noutput = \"out/nested\"\nsteps = [{ latex = \"xelatex\" }]\n\
+         [recipes.c]\noutput = \"build\"\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    std::fs::create_dir_all(f.path("out/nested")).unwrap();
+    std::fs::create_dir_all(f.path("build")).unwrap();
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!f.path("out").exists());
+    assert!(!f.path("build").exists());
+}
+
+#[test]
+fn clean_dot_output_refused_and_root_intact() {
+    let f = Fixture::new();
+    f.write_toml("[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \".\"\n[recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n");
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(f.path("texmake.toml").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_refuses_symlinked_output_outside_root() {
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.path("build")).unwrap();
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(outside.path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_does_not_follow_symlinks_inside_output() {
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(f.path("build")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.path("build/link")).unwrap();
+    assert_eq!(
+        f.cmd().arg("clean").output().unwrap().status.code(),
+        Some(0)
+    );
+    assert!(!f.path("build").exists());
+    assert!(outside.path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_dry_run_keeps_directories() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.path("build")).unwrap();
+    let out = f.cmd().args(["-n", "clean"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(f.path("build").exists());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("would remove"));
+}
+
+#[test]
+fn clean_refuses_output_outside_root() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.a]\noutput = \"../out\"\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("outside the project root"), "{err}");
+    assert!(f.path("texmake.toml").exists());
+}
+
+#[test]
+fn clean_refuses_regular_file_output() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.a]\noutput = \"out.pdf\"\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    std::fs::write(f.path("out.pdf"), "not a directory").unwrap();
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("file, not a directory"), "{err}");
+    assert!(f.path("out.pdf").is_file());
+}
+
+#[test]
+fn clean_skips_missing_output_directories() {
+    let f = Fixture::new();
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("removed"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_quiet_suppresses_removed_output() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\n",
+    );
+    f.cmd().output().unwrap();
+    let out = f.cmd().args(["-q", "clean"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!f.path("build").exists());
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
