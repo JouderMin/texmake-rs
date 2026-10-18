@@ -1,8 +1,8 @@
 //! Error types shared by every texmake subcommand.
 //!
 //! Every error knows its process exit code: usage/environment/config problems
-//! exit with 2, build failures with 1. Later tasks extend the enum with the
-//! build variants; `exit_code` stays the single mapping point.
+//! exit with 2, build failures (missing tools, failed steps) with 1.
+//! `exit_code` stays the single mapping point.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -16,6 +16,10 @@ pub enum Error {
     Environment(String),
     /// A problem with the configuration file.
     Config(ConfigError),
+    /// A build step needed an executable that is not available.
+    ToolMissing(Vec<String>),
+    /// A build step ran and failed.
+    BuildFailed(BuildFailed),
 }
 
 impl Error {
@@ -23,6 +27,7 @@ impl Error {
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Usage(_) | Error::Environment(_) | Error::Config(_) => 2,
+            Error::ToolMissing(_) | Error::BuildFailed(_) => 1,
         }
     }
 }
@@ -35,6 +40,14 @@ impl fmt::Display for Error {
             }
             // Config errors carry their own file/line/column formatting.
             Error::Config(error) => write!(f, "{error}"),
+            Error::ToolMissing(tools) => {
+                write!(f, "error: missing required executable(s):")?;
+                for tool in tools {
+                    write!(f, "\n  {tool}")?;
+                }
+                Ok(())
+            }
+            Error::BuildFailed(failure) => write!(f, "{failure}"),
         }
     }
 }
@@ -43,8 +56,50 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Config(error) => Some(error),
-            Error::Usage(_) | Error::Environment(_) => None,
+            Error::Usage(_)
+            | Error::Environment(_)
+            | Error::ToolMissing(_)
+            | Error::BuildFailed(_) => None,
         }
+    }
+}
+
+/// A build step that ran and exited unsuccessfully.
+///
+/// The build prints it as a fixed report: the rendered command, the exit code
+/// (or terminating signal), the last lines of the step's merged output, and
+/// the path of the complete log.
+#[derive(Debug)]
+pub struct BuildFailed {
+    /// Rendered command line of the failing step.
+    pub command: String,
+    /// Exit code when the process exited normally.
+    pub exit_code: Option<i32>,
+    /// Number of the signal that terminated the process, on Unix.
+    pub signal: Option<i32>,
+    /// Last lines of the step's merged standard output and standard error.
+    pub tail: Vec<String>,
+    /// Path of the complete build log.
+    pub log: PathBuf,
+}
+
+impl fmt::Display for BuildFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "error: step failed")?;
+        writeln!(f, "  command: {}", self.command)?;
+        match (self.exit_code, self.signal) {
+            (_, Some(signal)) => {
+                writeln!(f, "  exit code: signal {signal}")?;
+                writeln!(f, "  terminated by signal {signal}")?;
+            }
+            (Some(code), None) => writeln!(f, "  exit code: {code}")?,
+            (None, None) => writeln!(f, "  exit code: unknown")?,
+        }
+        writeln!(f, "  last 20 lines:")?;
+        for line in &self.tail {
+            writeln!(f, "    {line}")?;
+        }
+        write!(f, "  log: {}", self.log.display())
     }
 }
 

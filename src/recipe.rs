@@ -14,13 +14,11 @@ use crate::validate::{Project, Recipe, Step};
 pub struct ResolvedStep {
     /// Command line shown by `--dry-run` and by failure reports.
     pub display: String,
-    /// Execution details, read when builds execute steps.
-    #[allow(dead_code)] // read when builds execute steps in a later task
+    /// Execution details read by the build.
     pub exec: Option<ExecSpec>,
 }
 
 /// How to execute one resolved step without a shell (except `run` steps).
-#[allow(dead_code)] // fields are read when builds execute steps in a later task
 pub struct ExecSpec {
     /// Executable to spawn.
     pub program: String,

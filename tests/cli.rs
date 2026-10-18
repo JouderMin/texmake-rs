@@ -559,3 +559,199 @@ fn dry_run_prints_commands_when_up_to_date() {
     assert!(!stdout.contains("up to date"), "{stdout}");
     assert_eq!(ran_count(&f), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn build_runs_steps_and_writes_log() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho hello-from-tool\nexit 0\n",
+    );
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(f.path("build/main.pdf").exists());
+    let log = std::fs::read_to_string(f.path("build/texmake.log")).unwrap();
+    assert!(log.contains("-output-directory=build"), "{log}");
+    assert!(log.contains("hello-from-tool"), "{log}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Built"));
+}
+
+#[cfg(unix)]
+#[test]
+fn log_records_command_and_exit_code() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho done\n",
+    );
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    let log = std::fs::read_to_string(f.path("build/texmake.log")).unwrap();
+    assert!(log.contains("$ xelatex"), "{log}");
+    assert!(log.contains("[0]"), "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_tool_exits_1_and_lists_tools() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }, { biber = true }]\n",
+    );
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("xelatex") && err.contains("biber"), "{err}");
+    assert!(f.path("build/texmake.log").exists());
+    assert!(
+        std::fs::read_to_string(f.path("build/texmake.log"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_executable_tool_is_missing() {
+    let f = Fixture::new();
+    let bin = f.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("xelatex"), "#!/bin/sh\n").unwrap();
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("xelatex"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_steps_are_not_tool_checked() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n[recipes.a]\nsteps = [{ run = \"true\" }]\n",
+    );
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn tool_with_space_in_path_executes() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.path("tools dir")).unwrap();
+    std::fs::write(
+        f.path("tools dir/my tool.sh"),
+        "#!/bin/sh\ntouch build/graph.pdf\n",
+    )
+    .unwrap();
+    std::process::Command::new("chmod")
+        .args(["+x", f.path("tools dir/my tool.sh").to_str().unwrap()])
+        .status()
+        .unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\n\
+         [tools.graphviz]\ncommand = \"tools dir/my tool.sh\"\nargs = [\"{root}/graph.dot\"]\n\n\
+         [recipes.a]\nsteps = [{ tool = \"graphviz\" }]\n",
+    );
+    let out = f.cmd().output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(f.path("build/graph.pdf").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn makeindex_runs_in_output_dir() {
+    let f = Fixture::new();
+    f.fake_tool("makeindex", "#!/bin/sh\ntouch made.index\n");
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n[recipes.a]\nsteps = [{ makeindex = true }]\n",
+    );
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(0));
+    assert!(f.path("build/made.index").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn run_step_inherits_environment() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n[recipes.a]\nsteps = [{ run = \"echo $MARKER > env.txt\" }]\n",
+    );
+    let out = f.cmd().env("MARKER", "ok").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(f.path("env.txt")).unwrap().trim(),
+        "ok"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failure_reports_command_code_tail_and_log() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nfor i in $(seq 1 30); do echo line-$i; done\nexit 3\n",
+    );
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("command:"), "{err}");
+    assert!(err.contains("exit code: 3"), "{err}");
+    assert!(err.contains("log:"), "{err}");
+    assert!(err.contains("line-30"), "{err}");
+    assert!(err.contains("line-11"), "{err}");
+    assert!(!err.contains("line-10\n"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_still_prints_failure_report() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\necho boom\nexit 1\n");
+    let out = f.cmd().arg("-q").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("boom"));
+}
+
+#[cfg(unix)]
+#[test]
+fn failure_stops_later_steps() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\nexit 1\n");
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }, { run = \"touch later.marker\" }]\n",
+    );
+    assert_eq!(f.cmd().output().unwrap().status.code(), Some(1));
+    assert!(!f.path("later.marker").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_termination_reports_signal() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\nkill -TERM $$\n");
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("signal"));
+}
+
+#[cfg(unix)]
+#[test]
+fn pdf_directory_is_not_up_to_date() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    f.cmd().output().unwrap();
+    std::fs::remove_file(f.path("build/main.pdf")).unwrap();
+    std::fs::create_dir(f.path("build/main.pdf")).unwrap();
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Built"));
+    assert_eq!(ran_count(&f), 2);
+}

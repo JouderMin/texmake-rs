@@ -22,8 +22,8 @@ use crate::vars::{self, Vars};
 pub struct Project {
     /// Absolute, lexically normalized project root.
     pub root: PathBuf,
-    /// Absolute path of the configuration file.
-    #[allow(dead_code)] // used in build diagnostics in later tasks
+    /// Absolute path of the configuration file, compared by the up-to-date
+    /// check.
     pub config_path: PathBuf,
     /// Project name.
     pub name: String,

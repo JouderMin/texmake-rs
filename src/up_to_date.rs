@@ -23,7 +23,14 @@ pub fn is_up_to_date(project: &Project, recipe: &Recipe) -> bool {
         return false;
     }
     let pdf = recipe.output_path.join(format!("{}.pdf", recipe.main_stem));
-    let Ok(pdf_mtime) = fs::metadata(&pdf).and_then(|metadata| metadata.modified()) else {
+    // A directory named like the PDF must not count as a fresh build result.
+    let Ok(metadata) = fs::metadata(&pdf) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    let Ok(pdf_mtime) = metadata.modified() else {
         return false;
     };
     match newest_source_mtime(project) {
