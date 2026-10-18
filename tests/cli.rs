@@ -746,6 +746,28 @@ fn failure_report_has_fixed_format() {
 
 #[cfg(unix)]
 #[test]
+fn log_keeps_raw_non_utf8_output_bytes() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\nprintf '\\377\\376' >&2\nexit 1\n");
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let log = std::fs::read(f.path("build/texmake.log")).unwrap();
+    assert!(
+        log.windows(2)
+            .any(|pair| pair[0] == 0xff && pair[1] == 0xfe),
+        "the log must keep the raw output bytes: {log:?}"
+    );
+    assert!(
+        !log.windows(3)
+            .any(|triple| triple[0] == 0xef && triple[1] == 0xbf && triple[2] == 0xbd),
+        "the log must not contain lossy UTF-8 replacements: {log:?}"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("\u{fffd}\u{fffd}"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
 fn verbose_streams_tool_output() {
     let f = Fixture::new();
     f.fake_tool(

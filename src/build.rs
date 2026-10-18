@@ -327,8 +327,10 @@ impl<'a> Sink<'a> {
 /// Send every line read from `reader` to `sink`.
 ///
 /// Lines are split on `\n`; a trailing `\r` is dropped so Windows output does
-/// not leak carriage returns into the log, and invalid UTF-8 is replaced rather
-/// than treated as an error.
+/// not leak carriage returns into the log. The bytes themselves are forwarded
+/// unchanged: the log and the `--verbose` screen keep raw output, and only the
+/// failure report's tail applies a lossy UTF-8 decode. A read error is recorded
+/// on the sink and reported instead of silently ending the stream.
 fn forward_lines<R>(reader: R, sink: &Mutex<Sink<'_>>)
 where
     R: std::io::Read + Send,
