@@ -43,18 +43,12 @@ pub enum Language {
     En,
 }
 
-impl Language {
-    fn name(self) -> &'static str {
-        match self {
-            Language::Zh => "zh",
-            Language::En => "en",
-        }
-    }
-}
-
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+        f.write_str(match self {
+            Language::Zh => "zh",
+            Language::En => "en",
+        })
     }
 }
 
@@ -86,17 +80,18 @@ pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
     let dir = target_dir(&opts.dir)?;
 
     // A terminal session always asks; the command-line values become the
-    // defaults. Pipes and `--dry-run` never block on a question.
+    // defaults. Pipes and `--dry-run` never block on a question. The engine is
+    // checked first so an unsupported `--engine` is refused before asking.
     let interactive = !opts.dry_run && std::io::stdin().is_terminal();
-    let (name, engine, language) = if interactive {
+    ensure_supported_engine(opts.engine)?;
+    let answers = if interactive {
         ask_options(&dir, opts)?
     } else {
-        ensure_supported_engine(opts.engine)?;
-        (
-            project_name(&dir, opts.name.as_deref())?,
-            opts.engine,
-            opts.language,
-        )
+        prompt::Answers {
+            name: project_name(&dir, opts.name.as_deref())?,
+            language: opts.language,
+            engine: opts.engine,
+        }
     };
 
     let config_path = dir.join("texmake.toml");
@@ -124,7 +119,14 @@ pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
 
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create `{}`", dir.display()))?;
 
-    write_project(&dir, &name, engine, language, opts, &write_new_file)
+    write_project(
+        &dir,
+        &answers.name,
+        answers.engine,
+        answers.language,
+        opts,
+        &write_new_file,
+    )
 }
 
 /// `init` only generates `ctex`/`fontsetup` documents, which need a Unicode
@@ -140,68 +142,22 @@ fn ensure_supported_engine(engine: Engine) -> anyhow::Result<()> {
 
 /// Ask for the project name, language and engine, in that order.
 ///
-/// Each prompt offers the corresponding command-line value (or the target
-/// directory's name) as its default. Invalid answers are reported and the same
-/// question is asked again; end of input cancels before anything is written.
-fn ask_options(dir: &Path, opts: &InitOptions) -> anyhow::Result<(String, Engine, Language)> {
+/// Each prompt starts with the corresponding command-line value (or the target
+/// directory's name). A cancelled question aborts the command before anything is
+/// written.
+fn ask_options(dir: &Path, opts: &InitOptions) -> anyhow::Result<prompt::Answers> {
     let dir_name = dir.file_name().and_then(|name| name.to_str());
-    let name_default = opts.name.as_deref().or(dir_name);
-    let mut stdin = io::stdin().lock();
-    let mut stdout = io::stdout();
-
-    let name = prompt::ask(
-        "项目名",
-        name_default,
-        |value| {
-            let value = value.trim();
-            if value.is_empty() {
-                Err("the project name must not be empty".to_owned())
-            } else {
-                Ok(value.to_owned())
-            }
-        },
-        &mut stdin,
-        &mut stdout,
-    )?;
-
-    let language = prompt::ask(
-        "语言",
-        Some(opts.language.name()),
-        |value| match value.trim().to_lowercase().as_str() {
-            "zh" => Ok("zh".to_owned()),
-            "en" => Ok("en".to_owned()),
-            other => Err(format!("`{other}` is not a language; use `zh` or `en`")),
-        },
-        &mut stdin,
-        &mut stdout,
-    )?;
-
-    let engine = prompt::ask(
-        "引擎",
-        Some(opts.engine.command()),
-        |value| match value.trim().to_lowercase().as_str() {
-            "xelatex" => Ok("xelatex".to_owned()),
-            "lualatex" => Ok("lualatex".to_owned()),
-            "pdflatex" => {
-                Err("`pdflatex` is not supported; use `xelatex` or `lualatex`".to_owned())
-            }
-            other => Err(format!(
-                "`{other}` is not an engine; use `xelatex` or `lualatex`"
-            )),
-        },
-        &mut stdin,
-        &mut stdout,
-    )?;
-
-    let language = match language.as_str() {
-        "zh" => Language::Zh,
-        _ => Language::En,
+    let defaults = prompt::Answers {
+        name: opts
+            .name
+            .clone()
+            .or_else(|| dir_name.map(str::to_owned))
+            .unwrap_or_default(),
+        language: opts.language,
+        engine: opts.engine,
     };
-    let engine = match engine.as_str() {
-        "lualatex" => Engine::Lualatex,
-        _ => Engine::Xelatex,
-    };
-    Ok((name, engine, language))
+    let mut prompter = prompt::InquirePrompter;
+    prompt::collect(&mut prompter, defaults)
 }
 
 /// Refuse targets that cannot be written as regular files, before the target

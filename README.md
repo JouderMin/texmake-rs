@@ -24,13 +24,13 @@ texmake clean         # 删除所有配方的输出目录
 
 `texmake init [dir]` 创建项目，支持以下选项：
 
-- `--name <name>`：项目名。未指定时取目标目录名。目标目录没有目录名（例如 `/`）时报错，并要求用 `--name` 指定。
+- `--name <name>`：项目名。未指定时取目标目录名。非终端运行时，目标目录没有目录名（例如 `/`）会报错，并要求用 `--name` 指定；终端交互时改为要求输入项目名。
 - `--engine <pdflatex|xelatex|lualatex>`：生成配方使用的引擎，默认 `xelatex`。模板使用 ctex 与 fontsetup，仅支持 `xelatex` 或 `lualatex`；`pdflatex` 会被拒绝。
 - `--language <zh|en>`：生成的 `main.tex` 使用的语言，默认 `zh`。
 
 init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。中文模板使用 article 文档类与 ctex 宏包，中英文模板都加载 fontsetup 默认选项，需要用 xelatex 或 lualatex 编译。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过；同名路径已存在但不是普通文件（例如目录）时报错，且不写任何文件。`--engine pdflatex` 报错：模板使用 ctex 与 fontsetup，需要 xelatex 或 lualatex。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
 
-在终端中运行时，init 依次询问项目名、语言和引擎。方括号内是该次默认值（命令选项或目录名）。直接回车接受默认值。输入不合法时，init 打印一行错误，并重新询问同一项。按 Ctrl-C 结束命令。标准输入结束（EOF）时，init 取消操作，不写任何文件，退出码为 2。标准输入不是终端时（例如管道或 CI），init 不询问，直接使用选项或默认值；`-n` 也跳过询问。`-q` 不隐藏提问。
+在终端中运行时，init 依次询问项目名、语言和引擎。项目名用文本输入，初值为 `--name` 或目标目录名，不能为空或只有空白。语言用选择列表，选项为 `zh 中文` 与 `en English`；引擎也为选择列表，选项为 `xelatex` 与 `lualatex`。选择列表的光标起始于命令选项或默认值对应的项，直接回车接受。按 Esc 或 Ctrl-C 取消，标准输入结束（EOF）也取消；取消时 init 不写任何文件，退出码为 2。标准输入不是终端时（例如管道或 CI），init 不询问，直接使用选项或默认值；`-n` 也跳过询问。`-q` 不隐藏提问。
 
 ## 配置
 

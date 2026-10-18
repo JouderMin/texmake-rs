@@ -16,133 +16,230 @@
 
 //! Interactive questions asked by `texmake init` in a terminal.
 //!
-//! Prompts go to a writer (stdout in the real command) and answers come from a
-//! buffered reader (stdin). Answers are validated with a caller-supplied
-//! function; a rejected answer prints one error line and asks again. End of
-//! input cancels the command with a usage error, so the caller exits with code
-//! 2 before writing anything.
+//! The real prompts come from [`inquire`]: a text prompt for the project name
+//! and a select prompt for the language and the engine. [`collect`] keeps the
+//! order (project name, language, engine) and the defaults testable without a
+//! terminal. Cancelling a question (Esc, Ctrl-C or end of input) is reported as
+//! a usage error, so `init` exits with code 2 before writing anything.
 
-use std::io::{BufRead, Write};
+use anyhow::anyhow;
+use inquire::validator::Validation;
+use inquire::{CustomUserError, InquireError, Select, Text};
 
-use anyhow::Context;
-
+use crate::engine::Engine;
 use crate::error::usage;
+use crate::init::Language;
 
-/// Ask `question` until `validate` accepts the answer.
-///
-/// An empty answer selects `default`; without a default it is validated like
-/// any other answer, so a validator that rejects empty input asks again.
-/// Answers are trimmed. The prompt shows the default in brackets, for example
-/// `项目名 [demo]: `.
-pub fn ask(
-    question: &str,
-    default: Option<&str>,
-    validate: impl Fn(&str) -> Result<String, String>,
-    input: &mut impl BufRead,
-    out: &mut impl Write,
-) -> anyhow::Result<String> {
-    loop {
-        match default {
-            Some(default) => write!(out, "{question} [{default}]: ")?,
-            None => write!(out, "{question}: ")?,
-        }
-        out.flush()?;
+/// Display labels of the language choices, in the order shown by the prompt.
+const LANGUAGE_ZH: &str = "zh 中文";
+const LANGUAGE_EN: &str = "en English";
 
-        let mut line = String::new();
-        let read = input
-            .read_line(&mut line)
-            .context("cannot read the answer from stdin")?;
-        if read == 0 {
-            return Err(usage(format!("init cancelled: no answer for `{question}`")));
-        }
+/// Display labels of the engine choices, in the order shown by the prompt.
+const ENGINE_XELATEX: &str = "xelatex";
+const ENGINE_LUALATEX: &str = "lualatex";
 
-        let answer = line.trim();
-        let candidate = if answer.is_empty() {
-            default.unwrap_or_default()
-        } else {
-            answer
+/// The answers collected by `init` in a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    pub name: String,
+    pub language: Language,
+    pub engine: Engine,
+}
+
+/// Asks the questions of `init`; implemented by [`InquirePrompter`] in
+/// production and by a fake in the tests.
+pub trait Prompter {
+    fn ask_name(&mut self, default: &str) -> anyhow::Result<String>;
+    fn ask_language(&mut self, default: Language) -> anyhow::Result<Language>;
+    fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine>;
+}
+
+/// Asks the questions with [`inquire`] prompts on the terminal.
+pub struct InquirePrompter;
+
+impl Prompter for InquirePrompter {
+    fn ask_name(&mut self, default: &str) -> anyhow::Result<String> {
+        Text::new("项目名")
+            .with_initial_value(default)
+            .with_validator(validate_name)
+            .prompt()
+            .map(|name| name.trim().to_owned())
+            .map_err(cancelled)
+    }
+
+    fn ask_language(&mut self, default: Language) -> anyhow::Result<Language> {
+        let cursor = match default {
+            Language::Zh => 0,
+            Language::En => 1,
         };
-        match validate(candidate) {
-            Ok(value) => return Ok(value),
-            Err(message) => writeln!(out, "{message}")?,
+        let choice = Select::new("语言", vec![LANGUAGE_ZH, LANGUAGE_EN])
+            .with_starting_cursor(cursor)
+            .prompt()
+            .map_err(cancelled)?;
+        Ok(if choice == LANGUAGE_ZH {
+            Language::Zh
+        } else {
+            Language::En
+        })
+    }
+
+    fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine> {
+        let cursor = usize::from(default == Engine::Lualatex);
+        let choice = Select::new("引擎", vec![ENGINE_XELATEX, ENGINE_LUALATEX])
+            .with_starting_cursor(cursor)
+            .prompt()
+            .map_err(cancelled)?;
+        Ok(if choice == ENGINE_LUALATEX {
+            Engine::Lualatex
+        } else {
+            Engine::Xelatex
+        })
+    }
+}
+
+/// Ask the project name, then the language, then the engine.
+///
+/// `defaults` holds the command-line values (or the directory name); the
+/// prompts start with them. A cancelled question aborts the whole sequence.
+pub fn collect(prompter: &mut dyn Prompter, defaults: Answers) -> anyhow::Result<Answers> {
+    let name = prompter.ask_name(&defaults.name)?;
+    let language = prompter.ask_language(defaults.language)?;
+    let engine = prompter.ask_engine(defaults.engine)?;
+    Ok(Answers {
+        name,
+        language,
+        engine,
+    })
+}
+
+/// Reject a project name that is empty or only whitespace.
+fn validate_name(value: &str) -> Result<Validation, CustomUserError> {
+    if value.trim().is_empty() {
+        return Err("项目名不能为空".into());
+    }
+    Ok(Validation::Valid)
+}
+
+/// Map a cancelled or failed prompt to an error the caller can exit on.
+///
+/// Esc and Ctrl-C are reported as cancellations by [`inquire`]; a closed input
+/// arrives as [`std::io::ErrorKind::UnexpectedEof`]. Both end the command with a
+/// usage error before anything is written.
+fn cancelled(error: InquireError) -> anyhow::Error {
+    match error {
+        InquireError::OperationCanceled | InquireError::OperationInterrupted => {
+            usage("init cancelled: the questions were interrupted".to_owned())
         }
+        InquireError::IO(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+            usage("init cancelled: the input ended".to_owned())
+        }
+        other => anyhow!("cannot ask the init questions: {other}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use super::*;
     use crate::error::Error;
 
-    fn ask_with(
-        answers: &str,
-        default: Option<&str>,
-        validate: impl Fn(&str) -> Result<String, String>,
-    ) -> (Result<String, String>, String) {
-        let mut input = Cursor::new(answers.as_bytes());
-        let mut out = Vec::new();
-        let result = ask("项目名", default, validate, &mut input, &mut out)
-            .map_err(|error| error.to_string());
-        let out = String::from_utf8(out).expect("stdout is UTF-8");
-        (result, out)
+    #[derive(Debug)]
+    struct FakePrompter {
+        calls: Vec<&'static str>,
+        name_default: Option<String>,
+        language_default: Option<Language>,
+        engine_default: Option<Engine>,
+        fail_at: Option<&'static str>,
+        name: String,
+        language: Language,
+        engine: Engine,
     }
 
-    fn non_empty(value: &str) -> Result<String, String> {
-        let value = value.trim();
-        if value.is_empty() {
-            Err("the project name must not be empty".to_owned())
-        } else {
-            Ok(value.to_owned())
+    impl FakePrompter {
+        fn new() -> Self {
+            Self {
+                calls: Vec::new(),
+                name_default: None,
+                language_default: None,
+                engine_default: None,
+                fail_at: None,
+                name: "thesis".to_owned(),
+                language: Language::En,
+                engine: Engine::Lualatex,
+            }
+        }
+    }
+
+    impl Prompter for FakePrompter {
+        fn ask_name(&mut self, default: &str) -> anyhow::Result<String> {
+            self.calls.push("name");
+            self.name_default = Some(default.to_owned());
+            if self.fail_at == Some("name") {
+                return Err(usage("init cancelled: test".to_owned()));
+            }
+            Ok(self.name.clone())
+        }
+
+        fn ask_language(&mut self, default: Language) -> anyhow::Result<Language> {
+            self.calls.push("language");
+            self.language_default = Some(default);
+            if self.fail_at == Some("language") {
+                return Err(usage("init cancelled: test".to_owned()));
+            }
+            Ok(self.language)
+        }
+
+        fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine> {
+            self.calls.push("engine");
+            self.engine_default = Some(default);
+            if self.fail_at == Some("engine") {
+                return Err(usage("init cancelled: test".to_owned()));
+            }
+            Ok(self.engine)
+        }
+    }
+
+    fn defaults() -> Answers {
+        Answers {
+            name: "demo".to_owned(),
+            language: Language::Zh,
+            engine: Engine::Xelatex,
         }
     }
 
     #[test]
-    fn enter_accepts_the_default() {
-        let (answer, out) = ask_with("\n", Some("demo"), non_empty);
-        assert_eq!(answer.expect("answer"), "demo");
-        assert_eq!(out, "项目名 [demo]: ");
+    fn collect_asks_the_name_then_the_language_then_the_engine() {
+        let mut prompter = FakePrompter::new();
+        let answers = collect(&mut prompter, defaults()).expect("answers");
+        assert_eq!(prompter.calls, ["name", "language", "engine"]);
+        assert_eq!(answers.name, "thesis");
+        assert_eq!(answers.language, Language::En);
+        assert_eq!(answers.engine, Engine::Lualatex);
     }
 
     #[test]
-    fn invalid_answers_are_asked_again() {
-        let (answer, out) = ask_with("   \nok\n", None, non_empty);
-        assert_eq!(answer.expect("answer"), "ok");
-        assert_eq!(out, "项目名: the project name must not be empty\n项目名: ");
+    fn collect_passes_the_defaults_to_each_question() {
+        let mut prompter = FakePrompter::new();
+        collect(&mut prompter, defaults()).expect("answers");
+        assert_eq!(prompter.name_default.as_deref(), Some("demo"));
+        assert_eq!(prompter.language_default, Some(Language::Zh));
+        assert_eq!(prompter.engine_default, Some(Engine::Xelatex));
     }
 
     #[test]
-    fn end_of_input_cancels_with_a_usage_error() {
-        let mut input = Cursor::new(Vec::new());
-        let mut out = Vec::new();
-        let error = ask("项目名", Some("demo"), non_empty, &mut input, &mut out)
-            .expect_err("end of input must cancel");
+    fn collect_reports_a_cancelled_question_as_a_usage_error() {
+        let mut prompter = FakePrompter::new();
+        prompter.fail_at = Some("engine");
+        let error = collect(&mut prompter, defaults()).expect_err("cancelled");
         let error = error
             .downcast_ref::<Error>()
             .expect("the cancellation is a texmake error");
         assert!(matches!(error, Error::Usage(message) if message.contains("cancelled")));
-        assert_eq!(
-            String::from_utf8(out).expect("stdout is UTF-8"),
-            "项目名 [demo]: "
-        );
     }
 
     #[test]
-    fn empty_input_without_a_default_is_asked_again() {
-        let (answer, out) = ask_with("\n\nreal\n", None, non_empty);
-        assert_eq!(answer.expect("answer"), "real");
-        assert_eq!(out.matches("项目名: ").count(), 3);
-    }
-
-    #[test]
-    fn an_invalid_default_is_reported_and_the_question_repeats() {
-        let validate = |value: &str| match value {
-            "lualatex" => Ok(value.to_owned()),
-            _ => Err("use `lualatex`".to_owned()),
-        };
-        let (answer, out) = ask_with("\n\nlualatex\n", Some("pdflatex"), validate);
-        assert_eq!(answer.expect("answer"), "lualatex");
-        assert_eq!(out.matches("use `lualatex`\n").count(), 2);
+    fn the_name_validator_rejects_blank_names() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("   ").is_err());
+        assert!(matches!(validate_name("thesis"), Ok(Validation::Valid)));
     }
 }
