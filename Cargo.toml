@@ -7,6 +7,22 @@ edition = "2024"
 name = "texmake"
 path = "src/main.rs"
 
+[lib]
+name = "texmake"
+path = "src/lib.rs"
+
+[[bench]]
+name = "vars"
+harness = false
+
+[[bench]]
+name = "config"
+harness = false
+
+[[bench]]
+name = "scan"
+harness = false
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
