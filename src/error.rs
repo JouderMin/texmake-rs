@@ -1,67 +1,44 @@
 //! Error types shared by every texmake subcommand.
 //!
-//! Every error knows its process exit code: usage/environment/config problems
-//! exit with 2, build failures (missing tools, failed steps) with 1.
-//! `exit_code` stays the single mapping point.
+//! Domain failures (`Usage`, `Config`, `ToolMissing`, `BuildFailed`) are
+//! defined here with `thiserror`, and every one of them knows its process exit
+//! code: usage/configuration problems exit with 2, build failures (missing
+//! tools, failed steps) with 1. Environment and I/O failures are not modelled
+//! as a variant; the code that hits them attaches an `anyhow` context instead,
+//! and [`Error::exit_code`] keeps exit codes for the domain errors.
 
-use std::fmt;
 use std::path::PathBuf;
 
 /// A texmake failure, mapped to a process exit code by [`Error::exit_code`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Invalid command-line usage.
+    #[error("error: {0}")]
     Usage(String),
-    /// A problem with the environment texmake runs in.
-    Environment(String),
     /// A problem with the configuration file.
-    Config(ConfigError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     /// A build step needed an executable that is not available.
+    #[error("error: missing required executable(s):{}", render_tools(.0))]
     ToolMissing(Vec<String>),
     /// A build step ran and failed.
-    BuildFailed(BuildFailed),
+    #[error("{0}")]
+    BuildFailed(#[from] BuildFailed),
 }
 
 impl Error {
     /// The process exit code for this error.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Error::Usage(_) | Error::Environment(_) | Error::Config(_) => 2,
+            Error::Usage(_) | Error::Config(_) => 2,
             Error::ToolMissing(_) | Error::BuildFailed(_) => 1,
         }
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Usage(message) | Error::Environment(message) => {
-                write!(f, "error: {message}")
-            }
-            // Config errors carry their own file/line/column formatting.
-            Error::Config(error) => write!(f, "{error}"),
-            Error::ToolMissing(tools) => {
-                write!(f, "error: missing required executable(s):")?;
-                for tool in tools {
-                    write!(f, "\n  {tool}")?;
-                }
-                Ok(())
-            }
-            Error::BuildFailed(failure) => write!(f, "{failure}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Config(error) => Some(error),
-            Error::Usage(_)
-            | Error::Environment(_)
-            | Error::ToolMissing(_)
-            | Error::BuildFailed(_) => None,
-        }
-    }
+/// Render the missing-tool list one executable per line.
+fn render_tools(tools: &[String]) -> String {
+    tools.iter().map(|tool| format!("\n  {tool}")).collect()
 }
 
 /// A build step that ran and exited unsuccessfully.
@@ -69,7 +46,13 @@ impl std::error::Error for Error {
 /// The build prints it as a fixed report: the rendered command, the exit code
 /// (or terminating signal), the last lines of the step's merged output, and
 /// the path of the complete log.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "error: step failed\n  command: {command}\n  exit code: {}\n  last 20 lines:{}\n  log: {}",
+    exit_line(*exit_code, *signal),
+    tail_lines(tail),
+    log.display()
+)]
 pub struct BuildFailed {
     /// Rendered command line of the failing step.
     pub command: String,
@@ -83,30 +66,18 @@ pub struct BuildFailed {
     pub log: PathBuf,
 }
 
-impl fmt::Display for BuildFailed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "error: step failed")?;
-        writeln!(f, "  command: {}", self.command)?;
-        match (self.exit_code, self.signal) {
-            (_, Some(signal)) => {
-                writeln!(f, "  exit code: signal {signal}")?;
-                writeln!(f, "  terminated by signal {signal}")?;
-            }
-            (Some(code), None) => writeln!(f, "  exit code: {code}")?,
-            (None, None) => writeln!(f, "  exit code: unknown")?,
-        }
-        writeln!(f, "  last 20 lines:")?;
-        for line in &self.tail {
-            writeln!(f, "    {line}")?;
-        }
-        write!(f, "  log: {}", self.log.display())
+/// The `exit code:` value, including the signal note when one is known.
+fn exit_line(exit_code: Option<i32>, signal: Option<i32>) -> String {
+    match (exit_code, signal) {
+        (_, Some(signal)) => format!("signal {signal}\n  terminated by signal {signal}"),
+        (Some(code), None) => code.to_string(),
+        (None, None) => "unknown".to_owned(),
     }
 }
 
-impl From<ConfigError> for Error {
-    fn from(error: ConfigError) -> Self {
-        Error::Config(error)
-    }
+/// Render the output tail one indented line per entry.
+fn tail_lines(tail: &[String]) -> String {
+    tail.iter().map(|line| format!("\n    {line}")).collect()
 }
 
 /// A configuration-file problem.
@@ -114,9 +85,10 @@ impl From<ConfigError> for Error {
 /// `Toml` keeps the parser's message, which already names the line and column.
 /// `Semantic` is produced by validation once a span has been resolved to a
 /// line/column pair, and prints as `{path}:{line}:{column}: error: {reason}`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     /// The file is not valid TOML, or does not match the configuration schema.
+    #[error("{}: {source}", path.display())]
     Toml {
         /// Path of the offending configuration file.
         path: PathBuf,
@@ -124,6 +96,7 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
     /// The file parses but violates a semantic rule.
+    #[error("{}:{line}:{column}: error: {reason}", path.display())]
     Semantic {
         /// Path of the offending configuration file.
         path: PathBuf,
@@ -134,29 +107,4 @@ pub enum ConfigError {
         /// Human-readable reason.
         reason: String,
     },
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConfigError::Toml { path, source } => {
-                write!(f, "{}: {source}", path.display())
-            }
-            ConfigError::Semantic {
-                path,
-                line,
-                column,
-                reason,
-            } => write!(f, "{}:{line}:{column}: error: {reason}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ConfigError::Toml { source, .. } => Some(source),
-            ConfigError::Semantic { .. } => None,
-        }
-    }
 }

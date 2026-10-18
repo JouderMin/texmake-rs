@@ -88,14 +88,23 @@ pub fn run() -> i32 {
     let cli = Cli::parse();
     match execute(cli) {
         Ok(()) => 0,
-        Err(error) => {
-            eprintln!("{error}");
-            error.exit_code()
-        }
+        // Domain errors keep their exact text and exit code. Anything else is
+        // an `anyhow` context chain (I/O and environment failures); it exits
+        // with 2 and is printed with the same `error: ` prefix.
+        Err(error) => match error.downcast_ref::<Error>() {
+            Some(domain) => {
+                eprintln!("{domain}");
+                domain.exit_code()
+            }
+            None => {
+                eprintln!("error: {error:#}");
+                2
+            }
+        },
     }
 }
 
-fn execute(cli: Cli) -> Result<(), Error> {
+fn execute(cli: Cli) -> anyhow::Result<()> {
     // `init` creates a new project and must not require an existing
     // configuration; every other command loads the project first.
     if let Some(Command::Init {
@@ -118,7 +127,7 @@ fn execute(cli: Cli) -> Result<(), Error> {
     let loaded = crate::load_project(&cli)?;
     match &cli.command {
         Some(Command::Check) => {
-            let project = validate::build_plan(&loaded)?;
+            let project = validate::build_plan(&loaded).map_err(Error::from)?;
             print_check(&project);
             Ok(())
         }
@@ -131,14 +140,14 @@ fn execute(cli: Cli) -> Result<(), Error> {
 }
 
 /// Validate the project and remove every recipe's output directory.
-fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> Result<(), Error> {
-    let project = validate::build_plan(loaded)?;
+fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
+    let project = validate::build_plan(loaded).map_err(Error::from)?;
     clean::run_clean(&project, cli.dry_run, cli.quiet)
 }
 
 /// Validate the project, select the recipe and run the build.
-fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> Result<(), Error> {
-    let project = validate::build_plan(loaded)?;
+fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> anyhow::Result<()> {
+    let project = validate::build_plan(loaded).map_err(Error::from)?;
     let recipe = recipe::select_recipe(&project, name)?;
     let options = BuildOptions {
         force: cli.force,

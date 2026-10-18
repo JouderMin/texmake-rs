@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde::de::{self, DeserializeSeed, MapAccess, Visitor};
 use toml::Spanned;
@@ -182,7 +183,7 @@ impl<'de> DeserializeSeed<'de> for UnknownKey {
 /// against `cwd`) and must exist. Otherwise `texmake.toml` is searched for
 /// from `cwd` upward. `cwd` is normally absolute, which makes the returned
 /// path absolute too.
-pub fn discover(explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf, Error> {
+pub fn discover(explicit: Option<&Path>, cwd: &Path) -> anyhow::Result<PathBuf> {
     if let Some(explicit) = explicit {
         let path = if explicit.is_absolute() {
             explicit.to_path_buf()
@@ -192,10 +193,7 @@ pub fn discover(explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf, Error> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(Error::Environment(format!(
-            "configuration file not found: {}",
-            path.display()
-        )));
+        bail!("configuration file not found: {}", path.display());
     }
 
     for directory in cwd.ancestors() {
@@ -205,20 +203,19 @@ pub fn discover(explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf, Error> {
         }
     }
 
-    Err(Error::Environment(format!(
-        "no {FILE_NAME} found from {} upward",
-        cwd.display()
-    )))
+    bail!("no {FILE_NAME} found from {} upward", cwd.display())
 }
 
 /// Read and strictly parse the configuration file at `path`.
-pub fn load(path: &Path) -> Result<LoadedConfig, Error> {
+pub fn load(path: &Path) -> anyhow::Result<LoadedConfig> {
     let path = absolute(path);
     let source = std::fs::read_to_string(&path)
-        .map_err(|error| Error::Environment(format!("cannot read {}: {error}", path.display())))?;
-    let raw: RawConfig = toml::from_str(&source).map_err(|source| ConfigError::Toml {
-        path: path.clone(),
-        source,
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let raw: RawConfig = toml::from_str(&source).map_err(|source| {
+        Error::Config(ConfigError::Toml {
+            path: path.clone(),
+            source,
+        })
     })?;
     let root = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -298,10 +295,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_explicit_file_is_environment_error() {
+    fn missing_explicit_file_reports_the_path() {
         let tmp = tempfile::tempdir().unwrap();
         let error = discover(Some(Path::new("nope.toml")), tmp.path()).unwrap_err();
-        assert_eq!(error.exit_code(), 2);
         assert!(error.to_string().contains("nope.toml"), "{error}");
     }
 

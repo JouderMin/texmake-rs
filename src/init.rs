@@ -13,6 +13,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use clap::ValueEnum;
 
 use crate::error::Error;
@@ -88,9 +89,9 @@ pub struct InitOptions {
 /// Other files that already exist are kept and reported as skipped. With
 /// `dry_run` no directory or file is created; the planned actions are printed
 /// instead. `quiet` suppresses the progress lines.
-pub fn run_init(opts: &InitOptions) -> Result<(), Error> {
+pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
     if opts.engine == Engine::Pdflatex && opts.language == Language::Zh {
-        return Err(Error::Usage(
+        return Err(usage(
             "`pdflatex` cannot typeset Chinese; use `--language en` or another engine".to_owned(),
         ));
     }
@@ -121,9 +122,7 @@ pub fn run_init(opts: &InitOptions) -> Result<(), Error> {
         return Ok(());
     }
 
-    std::fs::create_dir_all(&dir).map_err(|error| {
-        Error::Environment(format!("cannot create `{}`: {error}", dir.display()))
-    })?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create `{}`", dir.display()))?;
 
     write_project(&dir, &name, opts, &write_new_file)
 }
@@ -131,24 +130,22 @@ pub fn run_init(opts: &InitOptions) -> Result<(), Error> {
 /// Refuse targets that cannot be written as regular files, before the target
 /// directory or any file is created. An existing configuration is refused as a
 /// whole; other existing regular files are kept and skipped later.
-fn precheck_targets(config: &Path, main: &Path, gitignore: &Path) -> Result<(), Error> {
+fn precheck_targets(config: &Path, main: &Path, gitignore: &Path) -> anyhow::Result<()> {
     for (path, is_config) in [(config, true), (main, false), (gitignore, false)] {
         let shown = path.display();
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.file_type().is_file() => {
-                return Err(Error::Usage(format!(
+                return Err(usage(format!(
                     "refusing to initialize: `{shown}` exists and is not a regular file"
                 )));
             }
             Ok(_) if is_config => {
-                return Err(Error::Usage(format!("refusing to overwrite `{shown}`")));
+                return Err(usage(format!("refusing to overwrite `{shown}`")));
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(Error::Environment(format!(
-                    "cannot inspect `{shown}`: {error}"
-                )));
+                return Err(error).with_context(|| format!("cannot inspect `{shown}`"));
             }
         }
     }
@@ -165,7 +162,7 @@ fn write_project(
     name: &str,
     opts: &InitOptions,
     writer: &dyn Fn(&Path, &str) -> io::Result<()>,
-) -> Result<(), Error> {
+) -> anyhow::Result<()> {
     let config_path = dir.join("texmake.toml");
     let files = [
         (
@@ -177,7 +174,7 @@ fn write_project(
     ];
 
     let mut created: Vec<PathBuf> = Vec::new();
-    let outcome = (|| -> Result<(), Error> {
+    let outcome = (|| -> anyhow::Result<()> {
         for (path, label, content) in &files {
             match writer(path, content) {
                 Ok(()) => {
@@ -192,10 +189,8 @@ fn write_project(
                     }
                 }
                 Err(error) => {
-                    return Err(Error::Environment(format!(
-                        "cannot create `{}`: {error}",
-                        path.display()
-                    )));
+                    return Err(error)
+                        .with_context(|| format!("cannot create `{}`", path.display()));
                 }
             }
         }
@@ -210,16 +205,14 @@ fn write_project(
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(Error::Usage(format!(
+                return Err(usage(format!(
                     "refusing to overwrite `{}`",
                     config_path.display()
                 )));
             }
             Err(error) => {
-                return Err(Error::Environment(format!(
-                    "cannot create `{}`: {error}",
-                    config_path.display()
-                )));
+                return Err(error)
+                    .with_context(|| format!("cannot create `{}`", config_path.display()));
             }
         }
         Ok(())
@@ -245,11 +238,9 @@ fn write_new_file(path: &Path, content: &str) -> io::Result<()> {
 
 /// The directory to initialize: `.` and an empty path mean the current
 /// directory, so the project name can be derived from its real name.
-fn target_dir(dir: &Path) -> Result<PathBuf, Error> {
+fn target_dir(dir: &Path) -> anyhow::Result<PathBuf> {
     if dir.as_os_str().is_empty() || dir == Path::new(".") {
-        return std::env::current_dir().map_err(|error| {
-            Error::Environment(format!("cannot read working directory: {error}"))
-        });
+        return std::env::current_dir().context("cannot read working directory");
     }
     Ok(dir.to_path_buf())
 }
@@ -339,6 +330,11 @@ fn escape_latex(name: &str) -> String {
         }
     }
     escaped
+}
+
+/// Wrap a usage error for the `anyhow`-based command layer.
+fn usage(message: String) -> anyhow::Error {
+    Error::Usage(message).into()
 }
 
 #[cfg(test)]

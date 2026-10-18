@@ -11,6 +11,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+
 use crate::error::Error;
 use crate::paths;
 use crate::validate::Project;
@@ -21,7 +23,7 @@ use crate::validate::Project;
 /// directories are skipped: there is nothing to clean. With `dry_run` the
 /// targets are printed instead of removed; `quiet` suppresses the `removed`
 /// lines but never dry-run output.
-pub fn run_clean(project: &Project, dry_run: bool, quiet: bool) -> Result<(), Error> {
+pub fn run_clean(project: &Project, dry_run: bool, quiet: bool) -> anyhow::Result<()> {
     // Refuse a symlinked `output` before anything is printed or removed.
     // `output_path` is canonicalized, so removing it would delete the link
     // target and leave the link dangling; deleting the link instead could
@@ -34,7 +36,7 @@ pub fn run_clean(project: &Project, dry_run: bool, quiet: bool) -> Result<(), Er
         if let Ok(metadata) = std::fs::symlink_metadata(&raw)
             && metadata.file_type().is_symlink()
         {
-            return Err(Error::Usage(format!(
+            return Err(usage(format!(
                 "refusing to remove `{}`: it is a symbolic link; point `output` in texmake.toml at the real directory",
                 shown.display()
             )));
@@ -54,21 +56,19 @@ pub fn run_clean(project: &Project, dry_run: bool, quiet: bool) -> Result<(), Er
             // Removing a symbolic link would leave its target in place while
             // reporting a successful clean, so refuse instead.
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(Error::Usage(format!(
+                return Err(usage(format!(
                     "refusing to remove `{shown}`: it is a symbolic link"
                 )));
             }
             Ok(metadata) if !metadata.is_dir() => {
-                return Err(Error::Usage(format!(
+                return Err(usage(format!(
                     "refusing to remove `{shown}`: it is not a directory"
                 )));
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
-                return Err(Error::Environment(format!(
-                    "cannot inspect `{shown}`: {error}"
-                )));
+                return Err(error).with_context(|| format!("cannot inspect `{shown}`"));
             }
         }
 
@@ -79,8 +79,7 @@ pub fn run_clean(project: &Project, dry_run: bool, quiet: bool) -> Result<(), Er
 
         // `remove_dir_all` does not follow symbolic links inside the directory:
         // it unlinks them, so a link pointing outside the project stays intact.
-        std::fs::remove_dir_all(&target)
-            .map_err(|error| Error::Environment(format!("cannot remove `{shown}`: {error}")))?;
+        std::fs::remove_dir_all(&target).with_context(|| format!("cannot remove `{shown}`"))?;
         if !quiet {
             println!("removed {shown}");
         }
@@ -94,4 +93,9 @@ fn display_path(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root)
         .map(Path::to_path_buf)
         .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Wrap a usage error for the `anyhow`-based command layer.
+fn usage(message: String) -> anyhow::Error {
+    Error::Usage(message).into()
 }

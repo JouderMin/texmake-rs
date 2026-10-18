@@ -16,18 +16,18 @@ mod up_to_date;
 mod validate;
 mod vars;
 
+use anyhow::Context;
+
 use crate::cli::Cli;
 use crate::config::LoadedConfig;
-use crate::error::Error;
 
 fn main() {
     std::process::exit(cli::run());
 }
 
 /// Discover and load the project configuration for `cli`.
-pub fn load_project(cli: &Cli) -> Result<LoadedConfig, Error> {
-    let cwd = std::env::current_dir()
-        .map_err(|error| Error::Environment(format!("cannot read working directory: {error}")))?;
+pub fn load_project(cli: &Cli) -> anyhow::Result<LoadedConfig> {
+    let cwd = std::env::current_dir().context("cannot read working directory")?;
     let path = config::discover(cli.file.as_deref(), &cwd)?;
     config::load(&path)
 }

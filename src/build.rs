@@ -8,6 +8,7 @@
 //! report with the command, the exit status, the last lines of output and the
 //! log path.
 
+use anyhow::Context;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -52,7 +53,7 @@ pub struct BuildOptions {
 /// Returns an environment error when the output directory or the log cannot be
 /// written or a step cannot be started, a tool error when a checked executable
 /// is missing, and a build error when a step exits unsuccessfully.
-pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> Result<(), Error> {
+pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> anyhow::Result<()> {
     if opts.dry_run {
         for step in recipe::resolve_steps(project, recipe) {
             println!("{}", step.display);
@@ -65,16 +66,11 @@ pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> Res
         }
         return Ok(());
     }
-    std::fs::create_dir_all(&recipe.output_path).map_err(|error| {
-        Error::Environment(format!(
-            "cannot create `{}`: {error}",
-            recipe.output_path.display()
-        ))
-    })?;
+    std::fs::create_dir_all(&recipe.output_path)
+        .with_context(|| format!("cannot create `{}`", recipe.output_path.display()))?;
     let log_path = recipe.output_path.join(LOG_NAME);
-    let mut log = File::create(&log_path).map_err(|error| {
-        Error::Environment(format!("cannot write `{}`: {error}", log_path.display()))
-    })?;
+    let mut log = File::create(&log_path)
+        .with_context(|| format!("cannot write `{}`", log_path.display()))?;
     let steps = recipe::resolve_steps(project, recipe);
     check_tools(project, &steps)?;
     for step in &steps {
@@ -185,7 +181,7 @@ fn spawn_program(root: &Path, exec: &ExecSpec) -> PathBuf {
 }
 
 /// Fail with every missing executable of the checked steps, in step order.
-fn check_tools(project: &Project, steps: &[ResolvedStep]) -> Result<(), Error> {
+fn check_tools(project: &Project, steps: &[ResolvedStep]) -> anyhow::Result<()> {
     let mut missing: Vec<String> = Vec::new();
     for step in steps {
         let Some(exec) = &step.exec else {
@@ -201,7 +197,7 @@ fn check_tools(project: &Project, steps: &[ResolvedStep]) -> Result<(), Error> {
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(Error::ToolMissing(missing))
+        Err(Error::ToolMissing(missing).into())
     }
 }
 
@@ -217,7 +213,7 @@ fn run_step(
     exec: &ExecSpec,
     program: &Path,
     verbose: bool,
-) -> Result<(), Error> {
+) -> anyhow::Result<()> {
     let command = format!("$ {}", step.display);
     write_log(log, log_path, &command)?;
     if verbose {
@@ -229,7 +225,7 @@ fn run_step(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| Error::Environment(format!("cannot start `{}`: {error}", exec.program)))?;
+        .with_context(|| format!("cannot start `{}`", exec.program))?;
     let stdout = child.stdout.take().expect("the child's stdout is piped");
     let stderr = child.stderr.take().expect("the child's stderr is piped");
     let (sender, receiver) = mpsc::channel::<String>();
@@ -252,9 +248,9 @@ fn run_step(
     stderr_reader
         .join()
         .expect("a line-forwarding thread never panics");
-    let status = child.wait().map_err(|error| {
-        Error::Environment(format!("cannot wait for `{}`: {error}", exec.program))
-    })?;
+    let status = child
+        .wait()
+        .with_context(|| format!("cannot wait for `{}`", exec.program))?;
     let (exit_code, signal) = status_parts(status);
     write_log(log, log_path, &format_exit_status(exit_code, signal))?;
     if status.success() {
@@ -266,7 +262,8 @@ fn run_step(
         signal,
         tail: tail.into_iter().collect(),
         log: log_path.to_path_buf(),
-    }))
+    })
+    .into())
 }
 
 /// Send every line read from `reader` to `sender`.
@@ -304,10 +301,8 @@ where
 }
 
 /// Append one line to the build log.
-fn write_log(log: &mut File, log_path: &Path, line: &str) -> Result<(), Error> {
-    writeln!(log, "{line}").map_err(|error| {
-        Error::Environment(format!("cannot write `{}`: {error}", log_path.display()))
-    })
+fn write_log(log: &mut File, log_path: &Path, line: &str) -> anyhow::Result<()> {
+    writeln!(log, "{line}").with_context(|| format!("cannot write `{}`", log_path.display()))
 }
 
 /// Print one line to stdout immediately, without buffering it.
