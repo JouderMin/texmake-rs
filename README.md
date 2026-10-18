@@ -28,7 +28,7 @@ texmake clean         # 删除所有配方的输出目录
 - `--engine <pdflatex|xelatex|lualatex>`：生成配方使用的引擎，默认 `xelatex`。
 - `--language <zh|en>`：生成的 `main.tex` 使用的语言，默认 `zh`。
 
-init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过。`--engine pdflatex --language zh` 报错：pdflatex 不能排版中文。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
+init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过；同名路径已存在但不是普通文件（例如目录）时报错，且不写任何文件。`--engine pdflatex --language zh` 报错：pdflatex 不能排版中文。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
 
 ## 配置
 
@@ -63,7 +63,7 @@ steps = [{ latex = "xelatex", args = ["-draftmode"] }]
 
 `[project]` 的键：`name` 和 `main` 必需；`output` 可选，默认 `build`；`default` 可选，指定默认配方。每个配方的 `steps` 必须非空；配方可用 `main` 和 `output` 覆盖项目级设置。
 
-未知键、缺失的必需键、类型错误和重复键都是配置错误。配置错误报告文件路径、行、列和原因。
+未知的键名、缺失的必需键、类型错误和重复键名都是配置错误。配置错误报告文件路径、行、列和原因。
 
 ## 命令
 
@@ -169,7 +169,7 @@ pandoc = "pandoc"
 - 主 PDF 存在，且是普通文件。
 - 主 PDF 的修改时间严格晚于项目根下所有普通文件的修改时间。
 
-扫描源文件时，不跟随符号链接，忽略 `.git` 和所有配方的输出目录。配置文件 `texmake.toml` 的修改时间也参与比较。
+扫描源文件时，不跟随符号链接，忽略 `.git` 和所有配方的输出目录。配置文件（`texmake.toml`，或 `--file` 指定的文件）的修改时间也参与比较。
 
 - `-B` 强制构建，忽略跳过判断。
 - 不含 latex 步骤的配方每次都执行。
@@ -178,7 +178,7 @@ pandoc = "pandoc"
 
 ## 日志与失败报告
 
-每次构建先清空 `<输出目录>/texmake.log`，再执行步骤。日志依次记录：
+执行构建时，先清空 `<输出目录>/texmake.log`，再执行步骤。`-n` 不创建输出目录，也不清空日志；跳过构建时同样不清空。日志依次记录：
 
 - 渲染后的命令，以 `$ ` 开头。
 - 该步骤合并后的标准输出和标准错误，按到达顺序排列。
