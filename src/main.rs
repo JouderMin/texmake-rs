@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! texmake entry point.
 //!
 //! `main` delegates argument parsing, command dispatch and error printing to

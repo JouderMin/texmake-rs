@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Acceptance tests for the design document's `§12` examples.
 //!
 //! Most of `§12` is covered by the per-command integration tests in
