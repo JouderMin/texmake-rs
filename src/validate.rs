@@ -6,13 +6,13 @@
 //! the raw TOML again.
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use toml::Spanned;
 
 use crate::config::{LoadedConfig, RawRecipe, RawStep, RawTool};
+use crate::engine::Engine;
 use crate::error::ConfigError;
 use crate::paths;
 use crate::vars::{self, Vars};
@@ -88,34 +88,6 @@ pub enum Step {
         /// Fixed arguments followed by the step's own arguments, rendered.
         args: Vec<String>,
     },
-}
-
-/// A LaTeX engine supported by the `latex` step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Engine {
-    /// `pdflatex`.
-    Pdflatex,
-    /// `xelatex`.
-    Xelatex,
-    /// `lualatex`.
-    Lualatex,
-}
-
-impl Engine {
-    /// The executable name of the engine.
-    pub fn command(self) -> &'static str {
-        match self {
-            Engine::Pdflatex => "pdflatex",
-            Engine::Xelatex => "xelatex",
-            Engine::Lualatex => "lualatex",
-        }
-    }
-}
-
-impl fmt::Display for Engine {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.command())
-    }
 }
 
 /// The project-level values shared by every recipe.
@@ -371,20 +343,10 @@ fn build_step(
     let extra_args = raw.args.as_deref().unwrap_or_default();
 
     if let Some(latex) = &raw.latex {
-        let engine = match latex.get_ref().as_str() {
-            "pdflatex" => Engine::Pdflatex,
-            "xelatex" => Engine::Xelatex,
-            "lualatex" => Engine::Lualatex,
-            other => {
-                return Err(loaded.error_at(
-                    latex.span(),
-                    format!(
-                        "unknown latex engine `{other}`; \
-                         expected `pdflatex`, `xelatex` or `lualatex`"
-                    ),
-                ));
-            }
-        };
+        let engine = latex
+            .get_ref()
+            .parse::<Engine>()
+            .map_err(|reason| loaded.error_at(latex.span(), reason))?;
         return Ok(Step::Latex {
             engine,
             args: render_args(loaded, vars, extra_args)?,

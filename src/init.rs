@@ -16,32 +16,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use clap::ValueEnum;
 
+use crate::engine::Engine;
 use crate::error::{Error, usage};
-
-/// LaTeX engine recorded in the generated recipe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Engine {
-    Pdflatex,
-    Xelatex,
-    Lualatex,
-}
-
-impl Engine {
-    /// The engine name as written to `texmake.toml`.
-    fn name(self) -> &'static str {
-        match self {
-            Engine::Pdflatex => "pdflatex",
-            Engine::Xelatex => "xelatex",
-            Engine::Lualatex => "lualatex",
-        }
-    }
-}
-
-impl fmt::Display for Engine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
 
 /// Document language of the generated `main.tex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

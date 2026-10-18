@@ -10,6 +10,7 @@ mod build;
 mod clean;
 mod cli;
 mod config;
+mod engine;
 mod error;
 mod init;
 mod paths;
