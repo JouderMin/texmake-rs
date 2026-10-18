@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use clap::ValueEnum;
 
-use crate::error::Error;
+use crate::error::{Error, usage};
 
 /// LaTeX engine recorded in the generated recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -330,11 +330,6 @@ fn escape_latex(name: &str) -> String {
         }
     }
     escaped
-}
-
-/// Wrap a usage error for the `anyhow`-based command layer.
-fn usage(message: String) -> anyhow::Error {
-    Error::Usage(message).into()
 }
 
 #[cfg(test)]

@@ -17,6 +17,9 @@ use crate::error::ConfigError;
 use crate::paths;
 use crate::vars::{self, Vars};
 
+/// Output directory used when neither the project nor the recipe sets one.
+const DEFAULT_OUTPUT: &str = "build";
+
 /// A validated project configuration.
 #[derive(Debug)]
 pub struct Project {
@@ -36,9 +39,6 @@ pub struct Project {
 /// One validated build recipe.
 #[derive(Debug)]
 pub struct Recipe {
-    /// Recipe name, used in build diagnostics.
-    #[allow(dead_code)] // read by build diagnostics in a later task
-    pub name: String,
     /// Main document, relative to the project root.
     pub main: String,
     /// Main document file name without its extension.
@@ -198,6 +198,15 @@ pub fn build_plan(loaded: &LoadedConfig) -> Result<Project, ConfigError> {
     })
 }
 
+/// The main document's file name without its extension.
+fn derive_main_stem(main: &str) -> String {
+    Path::new(main)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn build_recipe(
     loaded: &LoadedConfig,
     project: &ProjectMeta<'_>,
@@ -206,15 +215,24 @@ fn build_recipe(
 ) -> Result<Recipe, ConfigError> {
     let main_span = raw_recipe.main.as_ref().unwrap_or(project.main);
 
-    if raw_recipe.steps.is_empty() {
-        return Err(loaded.error_at(main_span.span(), format!("recipe `{name}` has no `steps`")));
-    }
+    let Some(steps) = raw_recipe
+        .steps
+        .as_ref()
+        .filter(|steps| !steps.get_ref().is_empty())
+    else {
+        let span = raw_recipe
+            .steps
+            .as_ref()
+            .map_or_else(|| main_span.span(), |steps| steps.span());
+        return Err(loaded.error_at(span, format!("recipe `{name}` has no `steps`")));
+    };
 
     let main = main_span.get_ref().clone();
     validate_main(loaded, project.root, &main, main_span.span())?;
 
     let output_span = raw_recipe.output.as_ref().or(project.output);
-    let output = output_span.map_or_else(|| "build".to_owned(), |span| span.get_ref().clone());
+    let output =
+        output_span.map_or_else(|| DEFAULT_OUTPUT.to_owned(), |span| span.get_ref().clone());
     let output_path = paths::validate_output(project.root, &output, &main).map_err(|reason| {
         loaded.error_at(
             output_span.map_or_else(|| main_span.span(), Spanned::span),
@@ -222,11 +240,7 @@ fn build_recipe(
         )
     })?;
 
-    let main_stem = Path::new(&main)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default()
-        .to_owned();
+    let main_stem = derive_main_stem(&main);
 
     let root_string = project.root.to_string_lossy().into_owned();
     let vars = Vars {
@@ -238,18 +252,17 @@ fn build_recipe(
         recipe: name,
     };
 
-    let mut steps = Vec::with_capacity(raw_recipe.steps.len());
-    for raw_step in &raw_recipe.steps {
-        steps.push(build_step(loaded, project.tools, &vars, raw_step)?);
+    let mut built_steps = Vec::with_capacity(steps.get_ref().len());
+    for raw_step in steps.get_ref() {
+        built_steps.push(build_step(loaded, project.tools, &vars, raw_step)?);
     }
 
     Ok(Recipe {
-        name: name.to_owned(),
         main,
         main_stem,
         output,
         output_path,
-        steps,
+        steps: built_steps,
     })
 }
 
@@ -265,14 +278,10 @@ fn validate_tool_templates(
 ) -> Result<(), ConfigError> {
     let root = project.root.to_string_lossy().into_owned();
     let main = project.main.get_ref().clone();
-    let main_stem = Path::new(&main)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default()
-        .to_owned();
+    let main_stem = derive_main_stem(&main);
     let output = project
         .output
-        .map_or_else(|| "build".to_owned(), |span| span.get_ref().clone());
+        .map_or_else(|| DEFAULT_OUTPUT.to_owned(), |span| span.get_ref().clone());
     let vars = Vars {
         root: &root,
         main: &main,
@@ -539,7 +548,6 @@ mod tests {
         assert_eq!(project.default, None);
 
         let recipe = &project.recipes["release"];
-        assert_eq!(recipe.name, "release");
         assert_eq!(recipe.main, "main.tex");
         assert_eq!(recipe.main_stem, "main");
         assert_eq!(recipe.output, "build");

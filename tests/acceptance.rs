@@ -4,9 +4,10 @@
 //!
 //! Most of `§12` is covered by the per-command integration tests in
 //! `tests/cli.rs`; this file exercises the real TeX toolchain and the
-//! remaining end-to-end flows. Tests that need an installed tool print a skip
-//! message and pass when the tool is missing, so the suite stays runnable on a
-//! machine without TeX Live.
+//! remaining end-to-end flows. Tests that need an installed tool print a
+//! `skipping <test>: <tool> not found` line and pass when the tool is missing,
+//! so the suite stays runnable on a machine without TeX Live; cargo captures
+//! the line, so run `cargo test -- --nocapture` to see which tests skipped.
 
 mod common;
 
@@ -130,7 +131,7 @@ steps = [{ latex = "xelatex" }]
 #[test]
 fn real_build_produces_pdf() {
     if !have("xelatex") {
-        eprintln!("skip: xelatex not found");
+        eprintln!("skipping real_build_produces_pdf: xelatex not found");
         return;
     }
     let f = Fixture::new();
@@ -149,7 +150,7 @@ fn real_build_produces_pdf() {
 #[test]
 fn real_build_skips_when_up_to_date() {
     if !have("xelatex") {
-        eprintln!("skip: xelatex not found");
+        eprintln!("skipping real_build_skips_when_up_to_date: xelatex not found");
         return;
     }
     let f = Fixture::new();
@@ -171,7 +172,7 @@ fn real_build_skips_when_up_to_date() {
 #[test]
 fn real_draft_rebuild_runs_xelatex_once() {
     if !have("xelatex") {
-        eprintln!("skip: xelatex not found");
+        eprintln!("skipping real_draft_rebuild_runs_xelatex_once: xelatex not found");
         return;
     }
     let f = Fixture::new();
@@ -195,7 +196,9 @@ fn real_draft_rebuild_runs_xelatex_once() {
         .open(f.path("main.tex"))
         .unwrap();
     if let Err(error) = edited.set_modified(future) {
-        eprintln!("skip: cannot set the modification time: {error}");
+        eprintln!(
+            "skipping real_draft_rebuild_runs_xelatex_once: cannot set the modification time: {error}"
+        );
         return;
     }
     let out = real_cmd(&f).args(["build", "draft"]).output().unwrap();
@@ -218,7 +221,7 @@ fn real_draft_rebuild_runs_xelatex_once() {
 #[test]
 fn real_biber_bibliography() {
     if !have("xelatex") || !have("biber") {
-        eprintln!("skip: toolchain not found");
+        eprintln!("skipping real_biber_bibliography: xelatex or biber not found");
         return;
     }
     let f = Fixture::new();
@@ -260,7 +263,7 @@ fn real_biber_bibliography() {
 #[test]
 fn init_then_real_build() {
     if !have("xelatex") {
-        eprintln!("skip: xelatex not found");
+        eprintln!("skipping init_then_real_build: xelatex not found");
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -497,7 +500,9 @@ fn real_tools_path_prefers_installed_toolchains_over_the_fixture() {
     // The real path must place whatever toolchains exist before `bin` as well.
     let installed = tool_directories();
     if installed.is_empty() {
-        eprintln!("skip: no installed toolchains on this machine");
+        eprintln!(
+            "skipping real_tools_path_prefers_installed_toolchains_over_the_fixture: no installed toolchains on this machine"
+        );
         return;
     }
     let real: Vec<PathBuf> = std::env::split_paths(&real_tools_path(&f)).collect();
@@ -522,7 +527,9 @@ fn real_tools_path_prefers_installed_toolchains_over_the_fixture() {
 #[test]
 fn installed_xelatex_is_used_instead_of_a_fixture_shadow() {
     if !have("xelatex") {
-        eprintln!("skip: xelatex not found");
+        eprintln!(
+            "skipping installed_xelatex_is_used_instead_of_a_fixture_shadow: xelatex not found"
+        );
         return;
     }
     let f = Fixture::new();

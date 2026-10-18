@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use crate::error::Error;
+use crate::error::usage;
 use crate::paths;
 use crate::validate::Project;
 
@@ -53,13 +53,8 @@ pub fn run_clean(project: &Project, dry_run: bool, quiet: bool) -> anyhow::Resul
         let shown = display_path(&project.root, &target);
         let shown = shown.display();
         match std::fs::symlink_metadata(&target) {
-            // Removing a symbolic link would leave its target in place while
-            // reporting a successful clean, so refuse instead.
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(usage(format!(
-                    "refusing to remove `{shown}`: it is a symbolic link"
-                )));
-            }
+            // `output_path` is canonicalized and a symlinked `output` was
+            // refused above, so this target cannot be a symbolic link.
             Ok(metadata) if !metadata.is_dir() => {
                 return Err(usage(format!(
                     "refusing to remove `{shown}`: it is not a directory"
@@ -93,9 +88,4 @@ fn display_path(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root)
         .map(Path::to_path_buf)
         .unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Wrap a usage error for the `anyhow`-based command layer.
-fn usage(message: String) -> anyhow::Error {
-    Error::Usage(message).into()
 }

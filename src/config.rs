@@ -71,8 +71,12 @@ pub struct RawRecipe {
     /// Recipe-level override of the project output directory.
     pub output: Option<Spanned<String>>,
     /// Ordered build steps; at least one is required semantically.
+    ///
+    /// `None` when the key is absent, so an empty `steps = []` and a missing
+    /// `steps` can both be reported; the array's own span is kept for that
+    /// error.
     #[serde(default)]
-    pub steps: Vec<Spanned<RawStep>>,
+    pub steps: Option<Spanned<Vec<Spanned<RawStep>>>>,
 }
 
 /// One step inside a recipe's `steps` array.
@@ -298,7 +302,16 @@ mod tests {
     fn missing_explicit_file_reports_the_path() {
         let tmp = tempfile::tempdir().unwrap();
         let error = discover(Some(Path::new("nope.toml")), tmp.path()).unwrap_err();
-        assert!(error.to_string().contains("nope.toml"), "{error}");
+        // The exit code (2) is covered end-to-end by
+        // `tests/cli.rs::explicit_missing_config`; this unit test pins the
+        // message contract without pulling the CLI layer in.
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "configuration file not found: {}",
+                tmp.path().join("nope.toml").display()
+            )
+        );
     }
 
     #[test]
@@ -316,7 +329,11 @@ mod tests {
         assert_eq!(loaded.root, tmp.path());
         assert_eq!(loaded.raw.project.name.get_ref(), "thesis");
         assert_eq!(
-            loaded.raw.recipes["release"].steps[0]
+            loaded.raw.recipes["release"]
+                .steps
+                .as_ref()
+                .unwrap()
+                .get_ref()[0]
                 .get_ref()
                 .latex
                 .as_ref()

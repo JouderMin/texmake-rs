@@ -36,6 +36,11 @@ impl Error {
     }
 }
 
+/// Wrap a usage error for the `anyhow`-based command layer.
+pub fn usage(message: String) -> anyhow::Error {
+    Error::Usage(message).into()
+}
+
 /// Render the missing-tool list one executable per line.
 fn render_tools(tools: &[String]) -> String {
     tools.iter().map(|tool| format!("\n  {tool}")).collect()
