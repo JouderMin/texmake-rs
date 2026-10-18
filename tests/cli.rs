@@ -1171,3 +1171,80 @@ fn init_escapes_quotes_in_the_project_name() {
     let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
     assert!(toml.contains("name = \"a\\\"b\""), "{toml}");
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_refuses_symlinked_output_inside_root() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.path("real")).unwrap();
+    std::os::unix::fs::symlink(f.path("real"), f.path("linked")).unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"linked\"\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("clean").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("symbolic link"), "{err}");
+    assert!(err.contains("linked"), "{err}");
+    assert!(
+        f.path("linked")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(f.path("real").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn repeated_clean_still_refuses_symlinked_output() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.path("real")).unwrap();
+    std::os::unix::fs::symlink(f.path("real"), f.path("linked")).unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"linked\"\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    assert_eq!(
+        f.cmd().arg("clean").output().unwrap().status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        f.cmd().arg("clean").output().unwrap().status.code(),
+        Some(2)
+    );
+    assert!(
+        f.path("linked")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(f.path("real").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_dry_run_refuses_symlinked_output_inside_root() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.path("real")).unwrap();
+    std::os::unix::fs::symlink(f.path("real"), f.path("linked")).unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"linked\"\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().args(["-n", "clean"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("would remove"), "{stdout}");
+    assert!(
+        f.path("linked")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(f.path("real").is_dir());
+}
