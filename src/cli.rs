@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::build::{self, BuildOptions};
+use crate::config::LoadedConfig;
 use crate::error::Error;
+use crate::recipe;
 use crate::validate::{self, Project};
 
 /// texmake: a make-like build tool for LaTeX document projects.
@@ -118,8 +121,25 @@ fn execute(cli: Cli) -> Result<(), Error> {
             print_check(&project);
             Ok(())
         }
-        _ => Err(Error::Usage("not implemented".to_owned())),
+        Some(Command::Build { name }) => build_command(&cli, &loaded, name.as_deref()),
+        Some(Command::Init { .. }) | Some(Command::Clean) => {
+            Err(Error::Usage("not implemented".to_owned()))
+        }
+        None => build_command(&cli, &loaded, None),
     }
+}
+
+/// Validate the project, select the recipe and run the build.
+fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> Result<(), Error> {
+    let project = validate::build_plan(loaded)?;
+    let recipe = recipe::select_recipe(&project, name)?;
+    let options = BuildOptions {
+        force: cli.force,
+        dry_run: cli.dry_run,
+        verbose: cli.verbose,
+        quiet: cli.quiet,
+    };
+    build::run_build(&project, recipe, &options)
 }
 
 /// Report what `texmake check` validated.

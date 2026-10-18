@@ -21,7 +21,6 @@ use crate::vars::{self, Vars};
 #[derive(Debug)]
 pub struct Project {
     /// Absolute, lexically normalized project root.
-    #[allow(dead_code)] // read by build and clean in later tasks
     pub root: PathBuf,
     /// Absolute path of the configuration file.
     #[allow(dead_code)] // used in build diagnostics in later tasks
@@ -35,10 +34,10 @@ pub struct Project {
 }
 
 /// One validated build recipe.
-#[allow(dead_code)] // consumed by build and clean in later tasks
 #[derive(Debug)]
 pub struct Recipe {
-    /// Recipe name.
+    /// Recipe name, used in build diagnostics.
+    #[allow(dead_code)] // read by build diagnostics in a later task
     pub name: String,
     /// Main document, relative to the project root.
     pub main: String,
@@ -53,7 +52,6 @@ pub struct Recipe {
 }
 
 /// One validated build step.
-#[allow(dead_code)] // consumed by the build in a later task
 #[derive(Debug)]
 pub enum Step {
     /// Run a LaTeX engine.
@@ -93,7 +91,6 @@ pub enum Step {
 }
 
 /// A LaTeX engine supported by the `latex` step.
-#[allow(dead_code)] // `command` is consumed by the build in a later task
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     /// `pdflatex`.
@@ -167,6 +164,8 @@ pub fn build_plan(loaded: &LoadedConfig) -> Result<Project, ConfigError> {
         output: loaded.raw.project.output.as_ref(),
         name: &project_name,
     };
+
+    validate_tool_templates(loaded, &tools, &project)?;
 
     if let Some(default) = &loaded.raw.project.default
         && !loaded.raw.recipes.contains_key(default.get_ref())
@@ -252,6 +251,49 @@ fn build_recipe(
         output_path,
         steps,
     })
+}
+
+/// Render every tool template once, even when no step references the tool.
+///
+/// Templates are validated against a project-level [`Vars`] because variable
+/// names do not depend on a recipe's values; this makes `check` report a bad
+/// variable in an unused tool instead of silently accepting it.
+fn validate_tool_templates(
+    loaded: &LoadedConfig,
+    tools: &BTreeMap<String, ToolSpec>,
+    project: &ProjectMeta<'_>,
+) -> Result<(), ConfigError> {
+    let root = project.root.to_string_lossy().into_owned();
+    let main = project.main.get_ref().clone();
+    let main_stem = Path::new(&main)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let output = project
+        .output
+        .map_or_else(|| "build".to_owned(), |span| span.get_ref().clone());
+    let vars = Vars {
+        root: &root,
+        main: &main,
+        main_stem: &main_stem,
+        output: &output,
+        name: project.name,
+        recipe: "",
+    };
+    for tool in tools.values() {
+        render_at(
+            loaded,
+            tool.command.get_ref(),
+            &vars,
+            false,
+            tool.command.span(),
+        )?;
+        for argument in &tool.args {
+            render_at(loaded, argument.get_ref(), &vars, false, argument.span())?;
+        }
+    }
+    Ok(())
 }
 
 /// Check that the main document is a direct `.tex` child of the project root

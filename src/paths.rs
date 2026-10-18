@@ -35,14 +35,26 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// Resolve `output` against `root` and reject unsafe output directories.
 ///
 /// `main_rel` is the recipe's main document, relative to `root`. The returned
-/// path is absolute. When the path exists it is canonicalized, following
-/// symbolic links, so a link pointing outside the project is rejected too.
+/// path is absolute. Every existing component is canonicalized, following
+/// symbolic links, so a link pointing outside the project is rejected even
+/// when the output directory itself does not exist yet.
 pub fn validate_output(root: &Path, output: &str, main_rel: &str) -> Result<PathBuf, String> {
     let root = normalize(root);
-    let root = root.canonicalize().unwrap_or(root);
+    let root = match root.canonicalize() {
+        Ok(canonical) => canonical,
+        // A root that does not exist has no symbolic links to follow, so the
+        // lexical path is already fully resolved.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => root,
+        Err(error) => {
+            return Err(format!(
+                "cannot resolve the project root {}: {error}",
+                root.display()
+            ));
+        }
+    };
 
     let joined = normalize(&root.join(output));
-    let resolved = joined.canonicalize().unwrap_or(joined);
+    let resolved = resolve_path(&joined)?;
 
     if resolved == root {
         return Err("the output directory must not be the project root".to_owned());
@@ -67,6 +79,43 @@ pub fn validate_output(root: &Path, output: &str, main_rel: &str) -> Result<Path
     }
 
     Ok(resolved)
+}
+
+/// Resolve `path` as far as it exists, then append the missing components
+/// lexically.
+///
+/// Canonicalizing the deepest existing ancestor follows symbolic links anywhere
+/// in the prefix, which is what catches an ancestor that leads outside the
+/// project. A failure other than "not found" is an error rather than a silent
+/// fallback to the lexical path.
+fn resolve_path(path: &Path) -> Result<PathBuf, String> {
+    let mut existing = path.to_path_buf();
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match existing.components().next_back() {
+                    Some(Component::Normal(part)) => {
+                        missing.push(part.to_os_string());
+                        existing.pop();
+                    }
+                    _ => {
+                        return Err(format!("cannot resolve `{}`: {error}", path.display()));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!("cannot resolve `{}`: {error}", path.display()));
+            }
+        }
+    }
 }
 
 /// Remove paths that are nested inside another entry in the list.
@@ -147,5 +196,17 @@ mod tests {
         let new = validate_output(tmp.path(), "build/thesis", "main.tex").unwrap();
         assert_eq!(existing, new.parent().unwrap().join("paper"));
         assert!(new.ends_with("build/thesis"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_ancestor_leading_outside_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("build")).unwrap();
+
+        let error = validate_output(tmp.path(), "build/thesis", "main.tex").unwrap_err();
+        assert!(error.contains("outside"), "{error}");
     }
 }

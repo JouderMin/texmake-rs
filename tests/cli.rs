@@ -254,3 +254,101 @@ fn tool_table_with_command_and_args_is_valid() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn dry_run_prints_resolved_commands_in_order() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\n\
+         [tools.graphviz]\ncommand = \"dot\"\nargs = [\"-Tpdf\", \"-o\", \"{output}/graph.pdf\"]\n\n\
+         [recipes.release]\nsteps = [\n\
+         { latex = \"xelatex\", args = [\"-shell-escape\"] },\n\
+         { biber = true },\n\
+         { bibtex = true },\n\
+         { makeindex = true },\n\
+         { tool = \"graphviz\", args = [\"graph.dot\"] },\n\
+         { run = \"sh scripts/gen.sh\" },\n]\n",
+    );
+    let out = f.cmd().args(["-n", "build", "release"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "xelatex -interaction=nonstopmode -halt-on-error -file-line-error -output-directory=build -shell-escape main.tex",
+            "biber build/main",
+            "bibtex build/main",
+            "makeindex main",
+            "dot -Tpdf -o build/graph.pdf graph.dot",
+            "sh scripts/gen.sh",
+        ]
+    );
+}
+
+#[test]
+fn dry_run_creates_no_output_dir_and_skips_tool_check() {
+    let f = Fixture::new();
+    let out = f.cmd().args(["-n"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!f.path("build").exists());
+}
+
+#[test]
+fn unknown_recipe_lists_available_names() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }]\n\
+         [recipes.draft]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().args(["build", "nope"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("unknown") && err.contains("release") && err.contains("draft"),
+        "{err}"
+    );
+}
+
+#[test]
+fn multiple_recipes_without_default_is_error() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }]\n\
+         [recipes.draft]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().args(["-n"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn unreferenced_tool_templates_are_validated() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\n\
+         [tools.graphviz]\ncommand = \"dot\"\nargs = [\"{bogus}\"]\n\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("check").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("unknown variable"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_output_ancestor_outside_root_is_config_error() {
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.path("build")).unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"build/out\"\n\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("check").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("outside"), "{stderr}");
+}

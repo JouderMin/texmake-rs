@@ -4,10 +4,12 @@
 //! [`cli::run`]; [`load_project`] is the shared configuration step that every
 //! project command performs before doing its work.
 
+mod build;
 mod cli;
 mod config;
 mod error;
 mod paths;
+mod recipe;
 mod validate;
 mod vars;
 
