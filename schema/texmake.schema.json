@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JouderMin/texmake-rs/schema/texmake.schema.json",
+  "title": "texmake 配置",
+  "description": "texmake 项目的构建配置，文件名为 texmake.toml。",
+  "type": "object",
+  "required": ["project"],
+  "additionalProperties": false,
+  "properties": {
+    "project": {
+      "description": "项目基本信息。",
+      "type": "object",
+      "required": ["name", "main"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "项目名。",
+          "type": "string"
+        },
+        "main": {
+          "description": "主文档路径，相对项目根目录。",
+          "type": "string"
+        },
+        "output": {
+          "description": "输出目录，默认 build。",
+          "type": "string"
+        },
+        "default": {
+          "description": "默认 recipe 名。",
+          "type": "string"
+        }
+      }
+    },
+    "recipes": {
+      "description": "构建配方表，至少一个。",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "description": "一个构建配方。",
+        "type": "object",
+        "required": ["steps"],
+        "additionalProperties": false,
+        "properties": {
+          "main": {
+            "description": "覆盖项目主文档。",
+            "type": "string"
+          },
+          "output": {
+            "description": "覆盖项目输出目录。",
+            "type": "string"
+          },
+          "steps": {
+            "description": "按顺序执行的步骤，至少一个。",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "description": "一个构建步骤，六个动作键恰好出现一个。",
+              "oneOf": [
+                {
+                  "description": "用 LaTeX 引擎编译主文档。",
+                  "type": "object",
+                  "required": ["latex"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "latex": {
+                      "description": "LaTeX 引擎。",
+                      "type": "string",
+                      "enum": ["pdflatex", "xelatex", "lualatex"]
+                    },
+                    "args": {
+                      "description": "追加到命令行的参数。",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "description": "运行 biber 处理参考文献。",
+                  "type": "object",
+                  "required": ["biber"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "biber": {
+                      "description": "固定为 true。",
+                      "const": true
+                    },
+                    "args": {
+                      "description": "追加到命令行的参数。",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "description": "运行 bibtex 处理参考文献。",
+                  "type": "object",
+                  "required": ["bibtex"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "bibtex": {
+                      "description": "固定为 true。",
+                      "const": true
+                    },
+                    "args": {
+                      "description": "追加到命令行的参数。",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "description": "运行 makeindex 处理索引。",
+                  "type": "object",
+                  "required": ["makeindex"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "makeindex": {
+                      "description": "固定为 true。",
+                      "const": true
+                    },
+                    "args": {
+                      "description": "追加到命令行的参数。",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "description": "运行一条 shell 命令。",
+                  "type": "object",
+                  "required": ["run"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "run": {
+                      "description": "完整命令，原样交给 shell。",
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "description": "运行 tools 表中定义的工具。",
+                  "type": "object",
+                  "required": ["tool"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tool": {
+                      "description": "工具名，对应 tools 表中的键。",
+                      "type": "string"
+                    },
+                    "args": {
+                      "description": "追加到命令行的参数。",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "description": "自定义工具表，供 tool 步骤引用。",
+      "type": "object",
+      "additionalProperties": {
+        "description": "一个工具定义。",
+        "oneOf": [
+          {
+            "description": "命令简写，值即命令。",
+            "type": "string"
+          },
+          {
+            "description": "带固定参数的工具表。",
+            "type": "object",
+            "required": ["command"],
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "description": "可执行文件名或路径。",
+                "type": "string"
+              },
+              "args": {
+                "description": "固定参数，先于步骤参数。",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
