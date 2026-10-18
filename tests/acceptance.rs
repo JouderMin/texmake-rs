@@ -83,6 +83,19 @@ fn cmd_in(directory: &Path) -> assert_cmd::Command {
     command
 }
 
+/// A `texmake` command whose `PATH` holds only one empty directory.
+///
+/// No platform can resolve `xelatex`, `dot` or any other program through it,
+/// so a test that expects a missing tool does not depend on the host's
+/// `/usr/bin`, `/usr/local/bin` or Homebrew layout. The returned temporary
+/// directory must stay alive for as long as the command runs.
+fn cmd_without_tools(f: &Fixture) -> (assert_cmd::Command, tempfile::TempDir) {
+    let empty = tempfile::tempdir().unwrap();
+    let mut command = f.cmd();
+    command.env("PATH", empty.path());
+    (command, empty)
+}
+
 /// The lines of the build log.
 fn log_lines(f: &Fixture) -> Vec<String> {
     std::fs::read_to_string(f.path("build/texmake.log"))
@@ -215,6 +228,11 @@ fn real_biber_bibliography() {
         f.path("build/main.bbl").exists(),
         "biber must write main.bbl"
     );
+    // `biblatex` with `backend=biber` writes `\entry{knuth}` records rather than
+    // `\bibitem`, so the cited key and the resolved name are checked instead.
+    let bbl = std::fs::read_to_string(f.path("build/main.bbl")).unwrap();
+    assert!(bbl.contains("\\entry{knuth}"), "{bbl}");
+    assert!(bbl.contains("family={Knuth}"), "{bbl}");
     let pdf = std::fs::metadata(f.path("build/main.pdf")).unwrap();
     assert!(pdf.len() > 0, "the bibliography build must produce a PDF");
 }
@@ -332,13 +350,32 @@ fn init_acceptance_covers_dry_run_quiet_and_existing_files() {
     assert!(err.contains("main.tex"), "{err}");
     assert!(!broken.path().join("texmake.toml").exists());
     assert!(!broken.path().join(".gitignore").exists());
+
+    // A project that already has `texmake.toml` is refused, dry run included.
+    let configured = tempfile::tempdir().unwrap();
+    std::fs::write(configured.path().join("texmake.toml"), "invalid\n").unwrap();
+    let out = cmd_in(configured.path())
+        .args(["init", "-n"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("refusing to overwrite"), "{err}");
+    assert!(!configured.path().join("main.tex").exists());
+    assert!(!configured.path().join(".gitignore").exists());
 }
 
 #[test]
 fn missing_xelatex_reports_tool() {
-    // The fixture `PATH` hides any installed TeX installation.
+    // `PATH` holds only an empty directory, so no platform can find xelatex.
     let f = Fixture::new();
-    let out = f.cmd().output().unwrap();
+    let (mut cmd, _empty) = cmd_without_tools(&f);
+    let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("xelatex"), "{err}");
@@ -352,7 +389,8 @@ fn configured_tool_dry_run_and_missing_tool() {
          [tools.graphviz]\ncommand = \"dot\"\n\n\
          [recipes.release]\nsteps = [{ tool = \"graphviz\", args = [\"-Tpdf\", \"-o\", \"graph.pdf\"] }]\n",
     );
-    let dry = f.cmd().arg("-n").output().unwrap();
+    let (mut dry, _empty) = cmd_without_tools(&f);
+    let dry = dry.arg("-n").output().unwrap();
     assert_eq!(
         dry.status.code(),
         Some(0),
@@ -364,7 +402,8 @@ fn configured_tool_dry_run_and_missing_tool() {
         "{}",
         String::from_utf8_lossy(&dry.stdout)
     );
-    let build = f.cmd().output().unwrap();
+    let (mut build, _empty) = cmd_without_tools(&f);
+    let build = build.output().unwrap();
     assert_eq!(
         build.status.code(),
         Some(1),
@@ -372,4 +411,32 @@ fn configured_tool_dry_run_and_missing_tool() {
         String::from_utf8_lossy(&build.stderr)
     );
     assert!(String::from_utf8_lossy(&build.stderr).contains("dot"));
+}
+
+#[test]
+fn fixture_dot_is_used_when_the_path_has_no_real_tools() {
+    let f = Fixture::new();
+    f.fake_tool("dot", "#!/bin/sh\nprintf 'fake dot\\n' > fake-dot.out\n");
+    f.write_toml(
+        "[project]\nname = \"fixture\"\nmain = \"main.tex\"\n\n\
+         [tools.graphviz]\ncommand = \"dot\"\n\n\
+         [recipes.release]\nsteps = [{ tool = \"graphviz\", args = [\"-Tpdf\", \"-o\", \"graph.pdf\"] }]\n",
+    );
+    // Only the fixture `bin` is visible: the fake `dot` must be picked up, and
+    // a real Graphviz installation can never shadow it.
+    let mut cmd = f.cmd();
+    cmd.env("PATH", f.path("bin"));
+    let out = cmd.output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.path("fake-dot.out")).unwrap_or_default(),
+        "fake dot\n"
+    );
+    let log = std::fs::read_to_string(f.path("build/texmake.log")).unwrap();
+    assert!(log.contains("$ dot -Tpdf -o graph.pdf"), "{log}");
 }
