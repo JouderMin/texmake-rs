@@ -352,3 +352,47 @@ fn symlinked_output_ancestor_outside_root_is_config_error() {
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(stderr.contains("outside"), "{stderr}");
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_ancestor_with_dotdot_output_is_config_error() {
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.path("build")).unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"build/../escaped\"\n\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("check").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("outside"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_symlink_output_is_config_error() {
+    let f = Fixture::new();
+    std::os::unix::fs::symlink(f.path("missing-target"), f.path("build")).unwrap();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"build/thesis\"\n\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("check").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("symbolic link"), "{stderr}");
+}
+
+#[test]
+fn missing_output_directory_without_symlinks_is_allowed() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\noutput = \"build/new/nested\"\n\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+    let out = f.cmd().arg("check").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("project: t"));
+}

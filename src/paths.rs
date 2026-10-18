@@ -35,9 +35,12 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// Resolve `output` against `root` and reject unsafe output directories.
 ///
 /// `main_rel` is the recipe's main document, relative to `root`. The returned
-/// path is absolute. Every existing component is canonicalized, following
-/// symbolic links, so a link pointing outside the project is rejected even
-/// when the output directory itself does not exist yet.
+/// path is absolute. Existing components are resolved for real before any
+/// containment check: symbolic links are followed and `..` applies to the
+/// resolved parent, so a link that escapes the project is rejected even when
+/// the final component does not exist yet. Only the still-missing tail is
+/// handled lexically, and a symbolic link that cannot be resolved (dangling or
+/// looping) is an error.
 pub fn validate_output(root: &Path, output: &str, main_rel: &str) -> Result<PathBuf, String> {
     let root = normalize(root);
     let root = match root.canonicalize() {
@@ -53,8 +56,7 @@ pub fn validate_output(root: &Path, output: &str, main_rel: &str) -> Result<Path
         }
     };
 
-    let joined = normalize(&root.join(output));
-    let resolved = resolve_path(&joined)?;
+    let resolved = resolve_output(&root, output)?;
 
     if resolved == root {
         return Err("the output directory must not be the project root".to_owned());
@@ -81,41 +83,72 @@ pub fn validate_output(root: &Path, output: &str, main_rel: &str) -> Result<Path
     Ok(resolved)
 }
 
-/// Resolve `path` as far as it exists, then append the missing components
-/// lexically.
+/// Resolve `output` against the real path `root`, following symbolic links in
+/// every component that exists.
 ///
-/// Canonicalizing the deepest existing ancestor follows symbolic links anywhere
-/// in the prefix, which is what catches an ancestor that leads outside the
-/// project. A failure other than "not found" is an error rather than a silent
-/// fallback to the lexical path.
-fn resolve_path(path: &Path) -> Result<PathBuf, String> {
-    let mut existing = path.to_path_buf();
+/// Components are walked in order, mirroring what the filesystem does when the
+/// directory is created, so `..` after a symbolic link goes to the link
+/// target's parent instead of popping a lexical component. `output` may name
+/// components that do not exist yet; those are kept in `missing` and appended
+/// lexically. A symbolic link that exists but cannot be resolved (a dangling or
+/// looping link) is an error rather than an ordinary missing directory.
+fn resolve_output(root: &Path, output: &str) -> Result<PathBuf, String> {
+    let mut resolved = root.to_path_buf();
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        match existing.canonicalize() {
-            Ok(canonical) => {
-                let mut resolved = canonical;
-                for component in missing.iter().rev() {
-                    resolved.push(component);
-                }
-                return Ok(resolved);
+
+    for component in Path::new(output).components() {
+        match component {
+            Component::Prefix(prefix) => {
+                resolved = PathBuf::from(prefix.as_os_str());
+                missing.clear();
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match existing.components().next_back() {
-                    Some(Component::Normal(part)) => {
+            Component::RootDir => {
+                resolved = PathBuf::from(Component::RootDir.as_os_str());
+                missing.clear();
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if missing.pop().is_none()
+                    && let Some(parent) = resolved.parent()
+                {
+                    resolved = parent.to_path_buf();
+                }
+            }
+            Component::Normal(part) => {
+                if !missing.is_empty() {
+                    missing.push(part.to_os_string());
+                    continue;
+                }
+                let candidate = resolved.join(part);
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        match candidate.canonicalize() {
+                            Ok(canonical) => resolved = canonical,
+                            Err(error) => {
+                                return Err(format!(
+                                    "the output path `{output}` contains the symbolic link \
+                                     `{}`, which cannot be resolved: {error}",
+                                    candidate.display()
+                                ));
+                            }
+                        }
+                    }
+                    Ok(_) => resolved = candidate,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         missing.push(part.to_os_string());
-                        existing.pop();
                     }
-                    _ => {
-                        return Err(format!("cannot resolve `{}`: {error}", path.display()));
+                    Err(error) => {
+                        return Err(format!("cannot resolve `{}`: {error}", candidate.display()));
                     }
                 }
-            }
-            Err(error) => {
-                return Err(format!("cannot resolve `{}`: {error}", path.display()));
             }
         }
     }
+
+    for part in missing {
+        resolved.push(part);
+    }
+    Ok(resolved)
 }
 
 /// Remove paths that are nested inside another entry in the list.
@@ -208,5 +241,63 @@ mod tests {
 
         let error = validate_output(tmp.path(), "build/thesis", "main.tex").unwrap_err();
         assert!(error.contains("outside"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dotdot_through_a_symlinked_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("build")).unwrap();
+
+        let error = validate_output(tmp.path(), "build/../escaped", "main.tex").unwrap_err();
+        assert!(error.contains("outside"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dangling_symlink_in_the_output_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("missing"), tmp.path().join("build")).unwrap();
+
+        let error = validate_output(tmp.path(), "build/thesis", "main.tex").unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_encountered_after_lexical_backtracking() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("build")).unwrap();
+
+        let error = validate_output(tmp.path(), "new/../build/thesis", "main.tex").unwrap_err();
+        assert!(error.contains("outside"), "{error}");
+    }
+
+    #[test]
+    fn allows_new_nested_directories_without_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+
+        let resolved = validate_output(tmp.path(), "build/new/nested", "main.tex").unwrap();
+        assert!(
+            resolved.ends_with("build/new/nested"),
+            "{}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn folds_dotdot_between_missing_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        let resolved = validate_output(tmp.path(), "new/../out", "main.tex").unwrap();
+        assert_eq!(resolved, root.join("out"));
     }
 }
