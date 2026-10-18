@@ -223,4 +223,4 @@ pandoc = "pandoc"
 
 ## 许可证
 
-本项目使用 GNU 通用公共许可证第 3 版发布，SPDX 标识为 `GPL-3.0-only`。完整条款见 [LICENSE](LICENSE)。
+本项目使用 GNU 通用公共许可证第 3 版或更新版本发布，SPDX 标识为 `GPL-3.0-or-later`。完整条款见 [LICENSE](LICENSE)。
