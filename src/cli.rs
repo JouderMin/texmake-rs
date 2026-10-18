@@ -12,8 +12,9 @@ use clap::{Parser, Subcommand};
 use crate::build::{self, BuildOptions};
 use crate::clean;
 use crate::config::LoadedConfig;
+use crate::engine::Engine;
 use crate::error::Error;
-use crate::init::{self, Engine, Language};
+use crate::init::{self, Language};
 use crate::recipe;
 use crate::validate::{self, Project};
 
