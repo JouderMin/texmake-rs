@@ -104,6 +104,11 @@ pub fn run() -> i32 {
     }
 }
 
-fn execute(_cli: Cli) -> Result<(), Error> {
+fn execute(cli: Cli) -> Result<(), Error> {
+    // `init` creates a new project and must not require an existing
+    // configuration; every other command loads the project first.
+    if !matches!(&cli.command, Some(Command::Init { .. })) {
+        crate::load_project(&cli)?;
+    }
     Err(Error::Usage("not implemented".to_owned()))
 }
