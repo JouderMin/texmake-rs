@@ -102,6 +102,8 @@ struct ProjectMeta<'a> {
     output: Option<&'a Spanned<String>>,
     /// Project name.
     name: &'a str,
+    /// Project root as a string, rendered once for every [`Vars`] set.
+    root_string: String,
 }
 
 /// A validated `[tools.<name>]` definition.
@@ -135,6 +137,7 @@ pub fn build_plan(loaded: &LoadedConfig) -> Result<Project, ConfigError> {
         main: &loaded.raw.project.main,
         output: loaded.raw.project.output.as_ref(),
         name: &project_name,
+        root_string: root.to_string_lossy().into_owned(),
     };
 
     validate_tool_templates(loaded, &tools, &project)?;
@@ -214,9 +217,8 @@ fn build_recipe(
 
     let main_stem = derive_main_stem(&main);
 
-    let root_string = project.root.to_string_lossy().into_owned();
     let vars = Vars {
-        root: &root_string,
+        root: &project.root_string,
         main: &main,
         main_stem: &main_stem,
         output: &output,
@@ -248,14 +250,13 @@ fn validate_tool_templates(
     tools: &BTreeMap<String, ToolSpec>,
     project: &ProjectMeta<'_>,
 ) -> Result<(), ConfigError> {
-    let root = project.root.to_string_lossy().into_owned();
     let main = project.main.get_ref().clone();
     let main_stem = derive_main_stem(&main);
     let output = project
         .output
         .map_or_else(|| DEFAULT_OUTPUT.to_owned(), |span| span.get_ref().clone());
     let vars = Vars {
-        root: &root,
+        root: &project.root_string,
         main: &main,
         main_stem: &main_stem,
         output: &output,

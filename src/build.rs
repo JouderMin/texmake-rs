@@ -14,8 +14,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::sync::Mutex;
 
 use crate::error::{BuildFailed, Error};
 use crate::recipe::{self, ExecSpec, ResolvedStep};
@@ -170,11 +169,11 @@ fn is_executable(path: &Path) -> bool {
 /// operating system search `PATH` when spawning.
 fn spawn_program(root: &Path, exec: &ExecSpec) -> PathBuf {
     if exec.check_tool
-        && let Some(path) = resolve_program(root, &exec.program)
+        && let Some(path) = resolve_program(root, exec.program.as_ref())
     {
         return path;
     }
-    PathBuf::from(&exec.program)
+    PathBuf::from(exec.program.as_ref())
 }
 
 /// Fail with every missing executable of the checked steps, in step order.
@@ -182,11 +181,11 @@ fn check_tools(project: &Project, steps: &[ResolvedStep]) -> anyhow::Result<()> 
     let mut missing: Vec<String> = Vec::new();
     for step in steps {
         let exec = &step.exec;
-        if !exec.check_tool || missing.contains(&exec.program) {
+        if !exec.check_tool || missing.iter().any(|name| name == exec.program.as_ref()) {
             continue;
         }
-        if resolve_program(&project.root, &exec.program).is_none() {
-            missing.push(exec.program.clone());
+        if resolve_program(&project.root, exec.program.as_ref()).is_none() {
+            missing.push(exec.program.to_string());
         }
     }
     if missing.is_empty() {
@@ -212,7 +211,7 @@ fn run_step(
     let command = format!("$ {}", step.display);
     write_log(log, log_path, &command)?;
     if verbose {
-        stream(&command);
+        stream(command.as_bytes());
     }
     let mut child = Command::new(program)
         .args(&exec.args)
@@ -223,26 +222,20 @@ fn run_step(
         .with_context(|| format!("cannot start `{}`", exec.program))?;
     let stdout = child.stdout.take().expect("the child's stdout is piped");
     let stderr = child.stderr.take().expect("the child's stderr is piped");
-    let (sender, receiver) = mpsc::channel::<String>();
-    let stdout_reader = forward_lines(stdout, sender.clone());
-    let stderr_reader = forward_lines(stderr, sender);
-    let mut tail = VecDeque::with_capacity(TAIL_LINES);
-    for line in receiver {
-        write_log(log, log_path, &line)?;
-        if verbose {
-            stream(&line);
-        }
-        if tail.len() == TAIL_LINES {
-            tail.pop_front();
-        }
-        tail.push_back(line);
+    let sink = Mutex::new(Sink::new(log, log_path, verbose));
+    std::thread::scope(|scope| {
+        scope.spawn(|| forward_lines(stdout, &sink));
+        scope.spawn(|| forward_lines(stderr, &sink));
+    });
+    let mut sink = match sink.into_inner() {
+        Ok(sink) => sink,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let tail = sink.tail_lines();
+    let error = sink.error;
+    if let Some(error) = error {
+        return Err(error);
     }
-    stdout_reader
-        .join()
-        .expect("a line-forwarding thread never panics");
-    stderr_reader
-        .join()
-        .expect("a line-forwarding thread never panics");
     let status = child
         .wait()
         .with_context(|| format!("cannot wait for `{}`", exec.program))?;
@@ -255,44 +248,109 @@ fn run_step(
         command: step.display.clone(),
         exit_code,
         signal,
-        tail: tail.into_iter().collect(),
+        tail,
         log: log_path.to_path_buf(),
     })
     .into())
 }
 
-/// Send every line read from `reader` to `sender`.
+/// The shared log sink both output readers write through.
+///
+/// Holding the sink behind a mutex keeps the two streams in arrival order
+/// without one message allocation per line, and lets the trailing lines be
+/// kept in a reused buffer pool.
+struct Sink<'a> {
+    log: &'a mut File,
+    log_path: &'a Path,
+    verbose: bool,
+    tail: VecDeque<Vec<u8>>,
+    spare: Option<Vec<u8>>,
+    error: Option<anyhow::Error>,
+}
+
+impl<'a> Sink<'a> {
+    fn new(log: &'a mut File, log_path: &'a Path, verbose: bool) -> Self {
+        Self {
+            log,
+            log_path,
+            verbose,
+            tail: VecDeque::with_capacity(TAIL_LINES),
+            spare: None,
+            error: None,
+        }
+    }
+
+    /// Append one output line to the log, to the screen and to the tail.
+    fn line(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.log
+            .write_all(bytes)
+            .and_then(|()| self.log.write_all(b"\n"))
+            .with_context(|| format!("cannot write `{}`", self.log_path.display()))?;
+        if self.verbose {
+            stream(bytes);
+        }
+        let mut slot = self.spare.take().unwrap_or_default();
+        slot.clear();
+        slot.extend_from_slice(bytes);
+        if self.tail.len() == TAIL_LINES {
+            self.spare = self.tail.pop_front();
+        }
+        self.tail.push_back(slot);
+        Ok(())
+    }
+
+    /// The trailing lines, oldest first, as lossy UTF-8.
+    fn tail_lines(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.tail)
+            .into_iter()
+            .map(|line| String::from_utf8_lossy(&line).into_owned())
+            .collect()
+    }
+}
+
+/// Send every line read from `reader` to `sink`.
 ///
 /// Lines are split on `\n`; a trailing `\r` is dropped so Windows output does
 /// not leak carriage returns into the log, and invalid UTF-8 is replaced rather
 /// than treated as an error.
-fn forward_lines<R>(reader: R, sender: mpsc::Sender<String>) -> thread::JoinHandle<()>
+fn forward_lines<R>(reader: R, sink: &Mutex<Sink<'_>>)
 where
-    R: std::io::Read + Send + 'static,
+    R: std::io::Read + Send,
 {
-    thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut buffer = Vec::new();
-        loop {
-            buffer.clear();
-            match reader.read_until(b'\n', &mut buffer) {
-                Ok(0) => break,
-                Ok(_) => {
-                    while buffer
-                        .last()
-                        .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
-                    {
-                        buffer.pop();
-                    }
-                    let line = String::from_utf8_lossy(&buffer).into_owned();
-                    if sender.send(line).is_err() {
-                        break;
-                    }
+    let mut reader = BufReader::new(reader);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) => return,
+            Ok(_) => {
+                while buffer
+                    .last()
+                    .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
+                {
+                    buffer.pop();
                 }
-                Err(_) => break,
+                let Ok(mut sink) = sink.lock() else {
+                    return;
+                };
+                if sink.error.is_some() {
+                    return;
+                }
+                if let Err(error) = sink.line(&buffer) {
+                    sink.error = Some(error);
+                    return;
+                }
+            }
+            Err(error) => {
+                if let Ok(mut sink) = sink.lock() {
+                    sink.error = Some(
+                        anyhow::Error::new(error).context("cannot read a step's output stream"),
+                    );
+                }
+                return;
             }
         }
-    })
+    }
 }
 
 /// Append one line to the build log.
@@ -301,9 +359,13 @@ fn write_log(log: &mut File, log_path: &Path, line: &str) -> anyhow::Result<()> 
 }
 
 /// Print one line to stdout immediately, without buffering it.
-fn stream(line: &str) {
+fn stream(line: &[u8]) {
     let mut stdout = std::io::stdout().lock();
-    if writeln!(stdout, "{line}").is_ok() {
+    if stdout
+        .write_all(line)
+        .and_then(|()| stdout.write_all(b"\n"))
+        .is_ok()
+    {
         let _ = stdout.flush();
     }
 }

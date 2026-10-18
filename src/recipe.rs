@@ -5,6 +5,7 @@
 //! the build's job, so `--dry-run` can print the exact command lines without
 //! side effects.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
@@ -21,7 +22,9 @@ pub struct ResolvedStep {
 /// How to execute one resolved step without a shell (except `run` steps).
 pub struct ExecSpec {
     /// Executable to spawn.
-    pub program: String,
+    ///
+    /// Built-in steps borrow a `'static` name; custom tools own theirs.
+    pub program: Cow<'static, str>,
     /// Arguments passed verbatim.
     pub args: Vec<String>,
     /// Working directory.
@@ -92,40 +95,48 @@ fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
             argv.push(format!("-output-directory={}", recipe.output));
             argv.extend(args.iter().cloned());
             argv.push(recipe.main.clone());
-            executable(engine.command().to_owned(), argv, root.to_path_buf(), true)
+            executable(
+                Cow::Borrowed(engine.command()),
+                argv,
+                root.to_path_buf(),
+                true,
+            )
         }
         Step::Biber { args } => {
             let mut argv = Vec::with_capacity(args.len() + 1);
             argv.extend(args.iter().cloned());
             argv.push(format!("{}/{}", recipe.output, recipe.main_stem));
-            executable("biber".to_owned(), argv, root.to_path_buf(), true)
+            executable(Cow::Borrowed("biber"), argv, root.to_path_buf(), true)
         }
         Step::Bibtex { args } => {
             let mut argv = Vec::with_capacity(args.len() + 1);
             argv.extend(args.iter().cloned());
             argv.push(format!("{}/{}", recipe.output, recipe.main_stem));
-            executable("bibtex".to_owned(), argv, root.to_path_buf(), true)
+            executable(Cow::Borrowed("bibtex"), argv, root.to_path_buf(), true)
         }
         Step::Makeindex { args } => {
             let mut argv = Vec::with_capacity(args.len() + 1);
             argv.extend(args.iter().cloned());
             argv.push(recipe.main_stem.clone());
             executable(
-                "makeindex".to_owned(),
+                Cow::Borrowed("makeindex"),
                 argv,
                 recipe.output_path.clone(),
                 true,
             )
         }
-        Step::Tool { command, args } => {
-            executable(command.clone(), args.clone(), root.to_path_buf(), true)
-        }
+        Step::Tool { command, args } => executable(
+            Cow::Owned(command.clone()),
+            args.clone(),
+            root.to_path_buf(),
+            true,
+        ),
         Step::Run { command } => {
             let (program, flag) = shell();
             ResolvedStep {
                 display: command.clone(),
                 exec: ExecSpec {
-                    program: program.to_owned(),
+                    program: Cow::Borrowed(program),
                     args: vec![flag.to_owned(), command.clone()],
                     cwd: root.to_path_buf(),
                     check_tool: false,
@@ -148,8 +159,13 @@ fn shell() -> (&'static str, &'static str) {
 }
 
 /// Build a resolved step that runs `program` with `args` directly.
-fn executable(program: String, args: Vec<String>, cwd: PathBuf, check_tool: bool) -> ResolvedStep {
-    let display = display_command(&program, &args);
+fn executable(
+    program: Cow<'static, str>,
+    args: Vec<String>,
+    cwd: PathBuf,
+    check_tool: bool,
+) -> ResolvedStep {
+    let display = display_command(program.as_ref(), &args);
     ResolvedStep {
         display,
         exec: ExecSpec {
