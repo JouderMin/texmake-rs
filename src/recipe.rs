@@ -85,28 +85,30 @@ pub fn resolve_steps(project: &Project, recipe: &Recipe) -> Vec<ResolvedStep> {
 fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
     match step {
         Step::Latex { engine, args } => {
-            let mut argv = vec![
-                "-interaction=nonstopmode".to_owned(),
-                "-halt-on-error".to_owned(),
-                "-file-line-error".to_owned(),
-                format!("-output-directory={}", recipe.output),
-            ];
+            let mut argv = Vec::with_capacity(args.len() + 5);
+            argv.push("-interaction=nonstopmode".to_owned());
+            argv.push("-halt-on-error".to_owned());
+            argv.push("-file-line-error".to_owned());
+            argv.push(format!("-output-directory={}", recipe.output));
             argv.extend(args.iter().cloned());
             argv.push(recipe.main.clone());
             executable(engine.command().to_owned(), argv, root.to_path_buf(), true)
         }
         Step::Biber { args } => {
-            let mut argv = args.clone();
+            let mut argv = Vec::with_capacity(args.len() + 1);
+            argv.extend(args.iter().cloned());
             argv.push(format!("{}/{}", recipe.output, recipe.main_stem));
             executable("biber".to_owned(), argv, root.to_path_buf(), true)
         }
         Step::Bibtex { args } => {
-            let mut argv = args.clone();
+            let mut argv = Vec::with_capacity(args.len() + 1);
+            argv.extend(args.iter().cloned());
             argv.push(format!("{}/{}", recipe.output, recipe.main_stem));
             executable("bibtex".to_owned(), argv, root.to_path_buf(), true)
         }
         Step::Makeindex { args } => {
-            let mut argv = args.clone();
+            let mut argv = Vec::with_capacity(args.len() + 1);
+            argv.extend(args.iter().cloned());
             argv.push(recipe.main_stem.clone());
             executable(
                 "makeindex".to_owned(),
@@ -162,25 +164,30 @@ fn executable(program: String, args: Vec<String>, cwd: PathBuf, check_tool: bool
 /// Render one command line the way `--dry-run` prints it: `argv` joined with
 /// spaces, each element quoted when needed.
 fn display_command(program: &str, args: &[String]) -> String {
-    std::iter::once(program)
-        .chain(args.iter().map(String::as_str))
-        .map(quote)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut display = String::with_capacity(
+        program.len() + args.iter().map(|arg| arg.len() + 2).sum::<usize>() + 1,
+    );
+    quote_into(program, &mut display);
+    for arg in args {
+        display.push(' ');
+        quote_into(arg, &mut display);
+    }
+    display
 }
 
-/// Quote one argument when it is empty or contains whitespace or a quote.
+/// Append one shell-quoted argument.
 ///
-/// Inside the quotes, `"` and `\` are escaped with a backslash.
-fn quote(argument: &str) -> String {
+/// Quotes are added only when the argument is empty or contains whitespace or a
+/// quote. Inside the quotes, `"` and `\` are escaped with a backslash.
+fn quote_into(argument: &str, quoted: &mut String) {
     let needs_quotes = argument.is_empty()
         || argument
             .chars()
             .any(|character| character.is_whitespace() || character == '"' || character == '\'');
     if !needs_quotes {
-        return argument.to_owned();
+        quoted.push_str(argument);
+        return;
     }
-    let mut quoted = String::with_capacity(argument.len() + 2);
     quoted.push('"');
     for character in argument.chars() {
         if character == '"' || character == '\\' {
@@ -189,6 +196,12 @@ fn quote(argument: &str) -> String {
         quoted.push(character);
     }
     quoted.push('"');
+}
+
+#[cfg(test)]
+fn quote(argument: &str) -> String {
+    let mut quoted = String::new();
+    quote_into(argument, &mut quoted);
     quoted
 }
 

@@ -65,8 +65,9 @@ fn visit(directory: &Path, outputs: &[&Path], newest: &mut Option<SystemTime>) {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
+        // `DirEntry::metadata` does not follow symbolic links, so it matches
+        // `symlink_metadata` while avoiding a fresh path allocation per entry.
+        let Ok(metadata) = entry.metadata() else {
             continue;
         };
         let file_type = metadata.file_type();
@@ -74,7 +75,13 @@ fn visit(directory: &Path, outputs: &[&Path], newest: &mut Option<SystemTime>) {
             continue;
         }
         if file_type.is_dir() {
-            if entry.file_name() == ".git" || outputs.contains(&path.as_path()) {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            // Only directories need their path, for the ignore check and the
+            // recursive call; regular files stay allocation free.
+            let path = entry.path();
+            if outputs.contains(&path.as_path()) {
                 continue;
             }
             visit(&path, outputs, newest);

@@ -107,6 +107,10 @@ pub fn render(template: &str, vars: &Vars<'_>, is_run: bool) -> Result<String, S
                 rendered.push('}');
                 index += 2;
             }
+            b'}' => {
+                rendered.push('}');
+                index += 1;
+            }
             b'$' if bytes.get(index + 1) == Some(&b'{') => {
                 if !is_run {
                     return Err("shell expansion `${...}` is only allowed in run steps".to_owned());
@@ -115,18 +119,35 @@ pub fn render(template: &str, vars: &Vars<'_>, is_run: bool) -> Result<String, S
                 rendered.push_str(&template[index..end]);
                 index = end;
             }
+            b'$' => {
+                rendered.push('$');
+                index += 1;
+            }
             _ => {
-                let character = template[index..]
-                    .chars()
-                    .next()
-                    .expect("index is a char boundary");
-                rendered.push(character);
-                index += character.len_utf8();
+                // Copy the whole run of plain text at once instead of one
+                // character at a time.
+                let end = next_special(bytes, index);
+                rendered.push_str(&template[index..end]);
+                index = end;
             }
         }
     }
 
     Ok(rendered)
+}
+
+/// The first index at or after `start` that may start a substitution.
+///
+/// Returns `bytes.len()` when the rest of the template is plain text.
+fn next_special(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'}' | b'$' => return index,
+            _ => index += 1,
+        }
+    }
+    index
 }
 
 /// Match `[A-Za-z_][A-Za-z0-9_]*` starting at `start`.
