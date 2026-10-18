@@ -961,3 +961,213 @@ fn clean_quiet_suppresses_removed_output() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn init_creates_project_files() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    for file in ["texmake.toml", "main.tex", ".gitignore"] {
+        assert!(f.path(file).exists(), "missing {file}");
+    }
+    let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
+    assert!(toml.contains("main = \"main.tex\""));
+    assert!(toml.contains("xelatex"));
+    assert!(
+        std::fs::read_to_string(f.path("main.tex"))
+            .unwrap()
+            .contains("ctexart")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_existing_config() {
+    let f = Fixture::new();
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing"));
+}
+
+#[cfg(unix)]
+#[test]
+fn init_keeps_existing_main_tex() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    f.write("main.tex", "keep-me");
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(f.path("main.tex")).unwrap(),
+        "keep-me"
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("skipped"));
+}
+
+#[cfg(unix)]
+#[test]
+fn init_rejects_pdflatex_with_chinese() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    let out = f
+        .cmd()
+        .args(["init", "--engine", "pdflatex", "--language", "zh"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn init_uses_directory_name_by_default() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    std::fs::create_dir_all(f.path("notes/project")).unwrap();
+    assert_eq!(
+        f.cmd()
+            .args(["init", "notes/project"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+    assert!(
+        std::fs::read_to_string(f.path("notes/project/texmake.toml"))
+            .unwrap()
+            .contains("name = \"project\"")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_creates_missing_directory() {
+    let f = Fixture::new();
+    let out = f.cmd().args(["init", "new/place"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    for file in [
+        "new/place/texmake.toml",
+        "new/place/main.tex",
+        "new/place/.gitignore",
+    ] {
+        assert!(f.path(file).exists(), "missing {file}");
+    }
+    let toml = std::fs::read_to_string(f.path("new/place/texmake.toml")).unwrap();
+    assert!(toml.contains("name = \"place\""), "{toml}");
+}
+
+#[cfg(unix)]
+#[test]
+fn init_prints_created_files() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for file in ["texmake.toml", "main.tex", ".gitignore"] {
+        assert!(stdout.contains(&format!("created {file}")), "{stdout}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn init_writes_default_gitignore() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    f.cmd().arg("init").output().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.path(".gitignore")).unwrap(),
+        "/build/\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_english_uses_article() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f
+        .cmd()
+        .args(["init", "--language", "en", "--name", "paper"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let main = std::fs::read_to_string(f.path("main.tex")).unwrap();
+    assert!(main.contains("\\documentclass{article}"), "{main}");
+    assert!(main.contains("Hello, world."), "{main}");
+    assert!(main.contains("paper"), "{main}");
+}
+
+#[cfg(unix)]
+#[test]
+fn init_engine_selects_lualatex() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    assert_eq!(
+        f.cmd()
+            .args(["init", "--engine", "lualatex"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+    let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
+    assert!(toml.contains("{ latex = \"lualatex\" }"), "{toml}");
+}
+
+#[cfg(unix)]
+#[test]
+fn init_name_option_overrides_directory_name() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    assert_eq!(
+        f.cmd()
+            .args(["init", "--name", "My Paper"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+    let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
+    assert!(toml.contains("name = \"My Paper\""), "{toml}");
+}
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_without_touching_existing_files() {
+    let f = Fixture::new();
+    let main_before = std::fs::read_to_string(f.path("main.tex")).unwrap();
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(f.path("main.tex")).unwrap(),
+        main_before
+    );
+    assert!(!f.path(".gitignore").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn init_escapes_quotes_in_the_project_name() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    assert_eq!(
+        f.cmd()
+            .args(["init", "--name", "a\"b"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+    let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
+    assert!(toml.contains("name = \"a\\\"b\""), "{toml}");
+}

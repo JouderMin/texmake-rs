@@ -9,6 +9,7 @@ mod clean;
 mod cli;
 mod config;
 mod error;
+mod init;
 mod paths;
 mod recipe;
 mod up_to_date;

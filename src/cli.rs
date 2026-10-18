@@ -2,17 +2,18 @@
 //!
 //! The CLI shape is the contract later tasks build on: global options are
 //! handled uniformly, and the subcommand variants carry the raw argument
-//! values. `check` validates the configuration and `clean` removes the output
-//! directories; only `init` is still a stub that reports "not implemented".
+//! values. `init` scaffolds a new project; `check`, the build commands and
+//! `clean` operate on an existing configuration.
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use crate::build::{self, BuildOptions};
 use crate::clean;
 use crate::config::LoadedConfig;
 use crate::error::Error;
+use crate::init::{self, Engine, Language};
 use crate::recipe;
 use crate::validate::{self, Project};
 
@@ -82,21 +83,6 @@ pub enum Command {
     Check,
 }
 
-/// LaTeX engines supported by `texmake init`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Engine {
-    Xelatex,
-    Pdflatex,
-    Lualatex,
-}
-
-/// Document languages supported by `texmake init`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Language {
-    Zh,
-    En,
-}
-
 /// Parse the command line and run texmake; returns the process exit code.
 pub fn run() -> i32 {
     let cli = Cli::parse();
@@ -112,8 +98,20 @@ pub fn run() -> i32 {
 fn execute(cli: Cli) -> Result<(), Error> {
     // `init` creates a new project and must not require an existing
     // configuration; every other command loads the project first.
-    if matches!(&cli.command, Some(Command::Init { .. })) {
-        return Err(Error::Usage("not implemented".to_owned()));
+    if let Some(Command::Init {
+        dir,
+        name,
+        engine,
+        language,
+    }) = &cli.command
+    {
+        let options = init::InitOptions {
+            dir: dir.clone().unwrap_or_else(|| PathBuf::from(".")),
+            name: name.clone(),
+            engine: *engine,
+            language: *language,
+        };
+        return init::run_init(&options);
     }
     let loaded = crate::load_project(&cli)?;
     match &cli.command {
@@ -124,7 +122,8 @@ fn execute(cli: Cli) -> Result<(), Error> {
         }
         Some(Command::Build { name }) => build_command(&cli, &loaded, name.as_deref()),
         Some(Command::Clean) => clean_command(&cli, &loaded),
-        Some(Command::Init { .. }) => Err(Error::Usage("not implemented".to_owned())),
+        // Handled before the configuration is loaded.
+        Some(Command::Init { .. }) => unreachable!("init does not load the project"),
         None => build_command(&cli, &loaded, None),
     }
 }
