@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use crate::error::Error;
 use crate::validate::{Project, Recipe, Step};
 
-/// One step with a printable command line and, when executable, its argv.
+/// One step with a printable command line and the argv that runs it.
 pub struct ResolvedStep {
     /// Command line shown by `--dry-run` and by failure reports.
     pub display: String,
     /// Execution details read by the build.
-    pub exec: Option<ExecSpec>,
+    pub exec: ExecSpec,
 }
 
 /// How to execute one resolved step without a shell (except `run` steps).
@@ -122,12 +122,12 @@ fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
             let (program, flag) = shell();
             ResolvedStep {
                 display: command.clone(),
-                exec: Some(ExecSpec {
+                exec: ExecSpec {
                     program: program.to_owned(),
                     args: vec![flag.to_owned(), command.clone()],
                     cwd: root.to_path_buf(),
                     check_tool: false,
-                }),
+                },
             }
         }
     }
@@ -150,12 +150,12 @@ fn executable(program: String, args: Vec<String>, cwd: PathBuf, check_tool: bool
     let display = display_command(&program, &args);
     ResolvedStep {
         display,
-        exec: Some(ExecSpec {
+        exec: ExecSpec {
             program,
             args,
             cwd,
             check_tool,
-        }),
+        },
     }
 }
 

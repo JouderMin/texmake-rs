@@ -50,9 +50,10 @@ pub struct BuildOptions {
 ///
 /// # Errors
 ///
-/// Returns an environment error when the output directory or the log cannot be
-/// written or a step cannot be started, a tool error when a checked executable
-/// is missing, and a build error when a step exits unsuccessfully.
+/// Returns an I/O error with the failing path as context when the output
+/// directory or the log cannot be written or a step cannot be started, a tool
+/// error when a checked executable is missing, and a build error when a step
+/// exits unsuccessfully.
 pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> anyhow::Result<()> {
     if opts.dry_run {
         for step in recipe::resolve_steps(project, recipe) {
@@ -74,11 +75,7 @@ pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> any
     let steps = recipe::resolve_steps(project, recipe);
     check_tools(project, &steps)?;
     for step in &steps {
-        // Every resolved step currently carries a command; the option leaves
-        // room for steps that only exist to be printed.
-        let Some(exec) = &step.exec else {
-            continue;
-        };
+        let exec = &step.exec;
         let program = spawn_program(&project.root, exec);
         run_step(&mut log, &log_path, step, exec, &program, opts.verbose)?;
     }
@@ -184,9 +181,7 @@ fn spawn_program(root: &Path, exec: &ExecSpec) -> PathBuf {
 fn check_tools(project: &Project, steps: &[ResolvedStep]) -> anyhow::Result<()> {
     let mut missing: Vec<String> = Vec::new();
     for step in steps {
-        let Some(exec) = &step.exec else {
-            continue;
-        };
+        let exec = &step.exec;
         if !exec.check_tool || missing.contains(&exec.program) {
             continue;
         }
