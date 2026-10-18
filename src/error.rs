@@ -69,8 +69,6 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
     /// The file parses but violates a semantic rule.
-    // Constructed by validation in a later task.
-    #[allow(dead_code)]
     Semantic {
         /// Path of the offending configuration file.
         path: PathBuf,

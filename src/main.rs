@@ -7,8 +7,8 @@
 mod cli;
 mod config;
 mod error;
-// Consumed by step resolution in a later task.
-#[allow(dead_code)]
+mod paths;
+mod validate;
 mod vars;
 
 use crate::cli::Cli;

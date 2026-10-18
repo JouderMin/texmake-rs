@@ -2,14 +2,15 @@
 //!
 //! The CLI shape is the contract later tasks build on: global options are
 //! handled uniformly, and the subcommand variants carry the raw argument
-//! values. This task only parses arguments; every subcommand still reports
-//! "not implemented".
+//! values. `check` validates the configuration; the remaining subcommands are
+//! still stubs that report "not implemented".
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::error::Error;
+use crate::validate::{self, Project};
 
 /// texmake: a make-like build tool for LaTeX document projects.
 #[derive(Debug, Parser)]
@@ -107,8 +108,29 @@ pub fn run() -> i32 {
 fn execute(cli: Cli) -> Result<(), Error> {
     // `init` creates a new project and must not require an existing
     // configuration; every other command loads the project first.
-    if !matches!(&cli.command, Some(Command::Init { .. })) {
-        crate::load_project(&cli)?;
+    if matches!(&cli.command, Some(Command::Init { .. })) {
+        return Err(Error::Usage("not implemented".to_owned()));
     }
-    Err(Error::Usage("not implemented".to_owned()))
+    let loaded = crate::load_project(&cli)?;
+    match &cli.command {
+        Some(Command::Check) => {
+            let project = validate::build_plan(&loaded)?;
+            print_check(&project);
+            Ok(())
+        }
+        _ => Err(Error::Usage("not implemented".to_owned())),
+    }
+}
+
+/// Report what `texmake check` validated.
+fn print_check(project: &Project) {
+    println!("project: {}", project.name);
+    println!("recipes:");
+    for name in project.recipes.keys() {
+        if project.default.as_deref() == Some(name.as_str()) {
+            println!("  {name} (default)");
+        } else {
+            println!("  {name}");
+        }
+    }
 }

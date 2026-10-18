@@ -8,9 +8,11 @@
 //! Unknown keys are rejected while parsing (`deny_unknown_fields`).
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde::de::{self, DeserializeSeed, MapAccess, Visitor};
 use toml::Spanned;
 
 use crate::error::{ConfigError, Error};
@@ -19,7 +21,6 @@ use crate::error::{ConfigError, Error};
 pub const FILE_NAME: &str = "texmake.toml";
 
 /// A configuration file that was found, read and parsed successfully.
-#[allow(dead_code)] // fields are consumed by validation in a later task
 #[derive(Debug)]
 pub struct LoadedConfig {
     /// Absolute path of the configuration file.
@@ -33,7 +34,6 @@ pub struct LoadedConfig {
 }
 
 /// The whole `texmake.toml` document.
-#[allow(dead_code)] // fields are consumed by validation in a later task
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
@@ -42,10 +42,12 @@ pub struct RawConfig {
     /// `[recipes.<name>]` tables; at least one is required semantically.
     #[serde(default)]
     pub recipes: BTreeMap<String, RawRecipe>,
+    /// `[tools.<name>]` definitions, referenced by `tool` steps.
+    #[serde(default)]
+    pub tools: BTreeMap<String, Spanned<RawTool>>,
 }
 
 /// The `[project]` table.
-#[allow(dead_code)] // fields are consumed by validation in a later task
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawProject {
@@ -60,7 +62,6 @@ pub struct RawProject {
 }
 
 /// One `[recipes.<name>]` table.
-#[allow(dead_code)] // fields are consumed by validation in a later task
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawRecipe {
@@ -77,7 +78,6 @@ pub struct RawRecipe {
 ///
 /// Exactly one action key must be present; that rule is checked semantically,
 /// so every action key is optional here.
-#[allow(dead_code)] // fields are consumed by validation in a later task
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawStep {
@@ -94,8 +94,86 @@ pub struct RawStep {
     /// `{ tool = "graphviz" }`.
     pub tool: Option<Spanned<String>>,
     /// Extra arguments appended to the built-in command.
+    ///
+    /// `None` distinguishes a missing `args` key from `args = []`, which
+    /// matters because `run` steps must not carry `args` at all.
     #[serde(default)]
-    pub args: Vec<Spanned<String>>,
+    pub args: Option<Vec<Spanned<String>>>,
+}
+
+/// One `[tools.<name>]` definition.
+///
+/// A tool is either a bare command string or a table with `command` and
+/// `args`. Both forms are deserialized through [`RawTool::deserialize`] so an
+/// unknown key can still be reported with its source position; that is why the
+/// tool definition is not a plain `#[derive(Deserialize)]` enum.
+#[derive(Debug)]
+pub enum RawTool {
+    /// The string shorthand: the value is the command itself.
+    Command(String),
+    /// The table form. Both keys are validated semantically later.
+    Table {
+        /// Executable name or path.
+        command: Option<Spanned<String>>,
+        /// Fixed arguments; rendered like step arguments.
+        args: Option<Vec<Spanned<String>>>,
+    },
+}
+
+impl<'de> Deserialize<'de> for RawTool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(RawToolVisitor)
+    }
+}
+
+struct RawToolVisitor;
+
+impl<'de> Visitor<'de> for RawToolVisitor {
+    type Value = RawTool;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a command string or a table with `command` and `args`")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<RawTool, E> {
+        Ok(RawTool::Command(value.to_owned()))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawTool, A::Error> {
+        let mut command = None;
+        let mut args = None;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "command" => command = Some(map.next_value::<Spanned<String>>()?),
+                "args" => args = Some(map.next_value::<Vec<Spanned<String>>>()?),
+                other => {
+                    let message = format!("unknown key `{other}` in a tool definition");
+                    return Err(map.next_value_seed(UnknownKey(message)).unwrap_err());
+                }
+            }
+        }
+        Ok(RawTool::Table { command, args })
+    }
+}
+
+/// A [`DeserializeSeed`] that always fails with a fixed message.
+///
+/// Rejecting an unknown tool key this way keeps TOML's position information:
+/// the surrounding map access attaches the rejected value's span to the error.
+struct UnknownKey(String);
+
+impl<'de> DeserializeSeed<'de> for UnknownKey {
+    type Value = std::convert::Infallible;
+
+    fn deserialize<D>(self, _deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Err(de::Error::custom(self.0))
+    }
 }
 
 /// Find the configuration file to use.
@@ -164,6 +242,34 @@ fn absolute(path: &Path) -> PathBuf {
     }
 }
 
+impl LoadedConfig {
+    /// Build a semantic configuration error pointing at `span`.
+    ///
+    /// Span offsets come from [`Spanned`] values and are resolved against
+    /// [`LoadedConfig::source`] so callers never compute line numbers.
+    pub fn error_at(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
+        let (line, column) = line_column(&self.source, span.start);
+        ConfigError::Semantic {
+            path: self.path.clone(),
+            line,
+            column,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Resolve a byte offset to a 1-based line and column.
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let before = &source[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(1, |prefix| prefix.chars().count() + 1);
+    (line, column)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +330,58 @@ mod tests {
         );
         let span = loaded.raw.project.name.span();
         assert_eq!(&loaded.source[span], "\"thesis\"");
+    }
+    #[test]
+    fn loads_tool_shorthand_and_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(
+            &path,
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n\n[tools]\npandoc = \"pandoc\"\n\n[tools.graphviz]\ncommand = \"dot\"\nargs = [\"-Tpdf\"]\n",
+        )
+        .unwrap();
+
+        let loaded = load(&path).unwrap();
+        match loaded.raw.tools["pandoc"].get_ref() {
+            RawTool::Command(command) => assert_eq!(command, "pandoc"),
+            other => panic!("expected shorthand, got {other:?}"),
+        }
+        match loaded.raw.tools["graphviz"].get_ref() {
+            RawTool::Table { command, args } => {
+                assert_eq!(command.as_ref().unwrap().get_ref(), "dot");
+                assert_eq!(args.as_ref().unwrap()[0].get_ref(), "-Tpdf");
+            }
+            other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_unknown_key_reports_position() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(
+            &path,
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n[tools.pandoc]\nbogus = 1\n",
+        )
+        .unwrap();
+
+        let error = load(&path).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("line 5"), "{text}");
+        assert!(text.contains("unknown key `bogus`"), "{text}");
+    }
+
+    #[test]
+    fn error_at_reports_line_and_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(&path, "[project]\nname = \"thesis\"\nmain = \"main.tex\"\n").unwrap();
+
+        let loaded = load(&path).unwrap();
+        let error = loaded.error_at(loaded.raw.project.name.span(), "bad name");
+        assert_eq!(
+            error.to_string(),
+            format!("{}:2:8: error: bad name", path.display())
+        );
     }
 }

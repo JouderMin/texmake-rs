@@ -57,6 +57,12 @@ pub fn render(template: &str, vars: &Vars<'_>, is_run: bool) -> Result<String, S
         return Err("`~` is not expanded outside run steps".to_owned());
     }
 
+    // Same reasoning for `${...}`: checking the whole template up front also
+    // catches it inside a literal brace group such as `{a${HOME}}`.
+    if !is_run && template.contains("${") {
+        return Err("shell expansion `${...}` is only allowed in run steps".to_owned());
+    }
+
     let bytes = template.as_bytes();
     let mut rendered = String::with_capacity(template.len());
     let mut index = 0;
@@ -148,6 +154,7 @@ fn identifier_at(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
 /// Nested braces are counted so `${VAR:-${OTHER}}` stays intact. An
 /// unterminated expansion extends to the end of the template.
 fn shell_expansion_end(bytes: &[u8], open: usize) -> usize {
+    debug_assert_eq!(bytes.get(open), Some(&b'{'));
     let mut depth = 0usize;
     let mut index = open;
     while index < bytes.len() {
@@ -271,5 +278,11 @@ mod tests {
     #[test]
     fn tilde_inside_literal_braces_is_still_rejected() {
         assert!(render("{a~b}", &vars("/p", "r"), false).is_err());
+    }
+
+    #[test]
+    fn shell_expansion_inside_literal_braces_is_rejected() {
+        let err = render("{a${HOME}}", &vars("/p", "r"), false).unwrap_err();
+        assert!(err.contains("run"), "{err}");
     }
 }
