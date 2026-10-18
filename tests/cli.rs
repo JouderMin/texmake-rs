@@ -1248,3 +1248,79 @@ fn clean_dry_run_refuses_symlinked_output_inside_root() {
     );
     assert!(f.path("real").is_dir());
 }
+
+#[cfg(unix)]
+#[test]
+fn init_dry_run_creates_nothing() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f.cmd().args(["-n", "init", "new/place"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for file in ["texmake.toml", "main.tex", ".gitignore"] {
+        assert!(stdout.contains(&format!("would create {file}")), "{stdout}");
+    }
+    assert!(!f.path("new/place").exists());
+    assert!(!f.path("texmake.toml").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn init_dry_run_reports_files_it_would_skip() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    f.write("main.tex", "keep-me");
+    let out = f.cmd().args(["-n", "init"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("would skip existing main.tex"), "{stdout}");
+    assert!(stdout.contains("would create texmake.toml"), "{stdout}");
+    assert!(!f.path("texmake.toml").exists());
+    assert_eq!(
+        std::fs::read_to_string(f.path("main.tex")).unwrap(),
+        "keep-me"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_dry_run_still_refuses_existing_config() {
+    let f = Fixture::new();
+    let out = f.cmd().args(["-n", "init"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing"));
+}
+
+#[cfg(unix)]
+#[test]
+fn init_quiet_suppresses_progress_output() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f.cmd().args(["-q", "init"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    for file in ["texmake.toml", "main.tex", ".gitignore"] {
+        assert!(f.path(file).exists(), "missing {file}");
+    }
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_directory_as_main_tex() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    std::fs::create_dir_all(f.path("main.tex")).unwrap();
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not a regular file"), "{err}");
+    assert!(err.contains("main.tex"), "{err}");
+    assert!(!f.path("texmake.toml").exists());
+}

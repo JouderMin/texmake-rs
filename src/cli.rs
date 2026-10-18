@@ -110,6 +110,8 @@ fn execute(cli: Cli) -> Result<(), Error> {
             name: name.clone(),
             engine: *engine,
             language: *language,
+            dry_run: cli.dry_run,
+            quiet: cli.quiet,
         };
         return init::run_init(&options);
     }
