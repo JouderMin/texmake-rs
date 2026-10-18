@@ -711,6 +711,64 @@ fn failure_reports_command_code_tail_and_log() {
 
 #[cfg(unix)]
 #[test]
+fn failure_report_has_fixed_format() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.a]\nsteps = [{ run = \"echo one; exit 3\" }]\n",
+    );
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    let prefix = "error: step failed\n  command: echo one; exit 3\n  exit code: 3\n  \
+                  last 20 lines:\n    one\n  log: ";
+    assert!(err.starts_with(prefix), "{err}");
+    assert!(err.trim_end().ends_with("build/texmake.log"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_streams_tool_output() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho streamed-line\n",
+    );
+    let out = f.cmd().arg("-v").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("streamed-line"));
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_prints_command_and_still_writes_log() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\necho streamed-line\n",
+    );
+    let out = f.cmd().arg("-v").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("$ xelatex"), "{stdout}");
+    assert!(stdout.contains("Built build/main.pdf"), "{stdout}");
+    let log = std::fs::read_to_string(f.path("build/texmake.log")).unwrap();
+    assert!(log.contains("streamed-line"), "{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_suppresses_success_output() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", FAKE_XELATEX);
+    let out = f.cmd().arg("-q").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("Built"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
 fn quiet_still_prints_failure_report() {
     let f = Fixture::new();
     f.fake_tool("xelatex", "#!/bin/sh\necho boom\nexit 1\n");
@@ -740,6 +798,18 @@ fn signal_termination_reports_signal() {
     let out = f.cmd().output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("signal"));
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_exit_status_is_reported() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\nkill -TERM $$\n");
+    let out = f.cmd().output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("exit code: signal 15"), "{err}");
+    assert!(err.contains("terminated by signal 15"), "{err}");
 }
 
 #[cfg(unix)]

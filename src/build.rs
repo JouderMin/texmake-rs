@@ -33,7 +33,6 @@ pub struct BuildOptions {
     /// Print commands without executing them.
     pub dry_run: bool,
     /// Print full commands and tool output.
-    #[allow(dead_code)] // streamed by the build in a later task
     pub verbose: bool,
     /// Print errors only.
     pub quiet: bool,
@@ -43,6 +42,10 @@ pub struct BuildOptions {
 ///
 /// `--dry-run` prints every command even with `--quiet` and performs no
 /// up-to-date check, no output-directory creation and no tool check.
+///
+/// `--verbose` prints each rendered command and every line of the steps'
+/// merged output to stdout as it arrives; the log still records the same
+/// lines.
 ///
 /// # Errors
 ///
@@ -81,7 +84,7 @@ pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> Res
             continue;
         };
         let program = spawn_program(&project.root, exec);
-        run_step(&mut log, &log_path, step, exec, &program)?;
+        run_step(&mut log, &log_path, step, exec, &program, opts.verbose)?;
     }
     if !opts.quiet {
         println!("Built {}/{}.pdf", recipe.output, recipe.main_stem);
@@ -203,14 +206,23 @@ fn check_tools(project: &Project, steps: &[ResolvedStep]) -> Result<(), Error> {
 }
 
 /// Run one step, merging its output into the log and reporting a failure.
+///
+/// With `verbose`, the rendered command and every output line are also printed
+/// to stdout as soon as they arrive, so the log and the terminal see the same
+/// merged stream.
 fn run_step(
     log: &mut File,
     log_path: &Path,
     step: &ResolvedStep,
     exec: &ExecSpec,
     program: &Path,
+    verbose: bool,
 ) -> Result<(), Error> {
-    write_log(log, log_path, &format!("$ {}", step.display))?;
+    let command = format!("$ {}", step.display);
+    write_log(log, log_path, &command)?;
+    if verbose {
+        stream(&command);
+    }
     let mut child = Command::new(program)
         .args(&exec.args)
         .current_dir(&exec.cwd)
@@ -226,6 +238,9 @@ fn run_step(
     let mut tail = VecDeque::with_capacity(TAIL_LINES);
     for line in receiver {
         write_log(log, log_path, &line)?;
+        if verbose {
+            stream(&line);
+        }
         if tail.len() == TAIL_LINES {
             tail.pop_front();
         }
@@ -293,6 +308,14 @@ fn write_log(log: &mut File, log_path: &Path, line: &str) -> Result<(), Error> {
     writeln!(log, "{line}").map_err(|error| {
         Error::Environment(format!("cannot write `{}`: {error}", log_path.display()))
     })
+}
+
+/// Print one line to stdout immediately, without buffering it.
+fn stream(line: &str) {
+    let mut stdout = std::io::stdout().lock();
+    if writeln!(stdout, "{line}").is_ok() {
+        let _ = stdout.flush();
+    }
 }
 
 /// The exit code and terminating signal of `status`, where available.
