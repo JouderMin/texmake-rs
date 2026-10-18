@@ -32,7 +32,7 @@ init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` �
 
 ## 配置
 
-texmake 从当前目录向上查找最近的 `texmake.toml`。`--file <path>` 指定其他配置文件；相对路径按当前目录解析，文件必须存在。配置文件所在目录是项目根，所有相对路径按项目根解析。
+texmake 只读取当前目录下的 `texmake.toml`，不向父目录查找。`--file <path>` 指定其他配置文件；相对路径按当前目录解析，文件必须存在。配置文件所在目录是项目根，所有相对路径按项目根解析。
 
 ```toml
 [project]

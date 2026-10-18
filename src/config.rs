@@ -17,8 +17,8 @@
 //! Configuration discovery and strict TOML parsing.
 //!
 //! [`discover`] locates `texmake.toml`: an explicit `--file` path wins,
-//! otherwise the file is searched for while walking up from the working
-//! directory, nearest match first. [`load`] reads the file and parses it into
+//! otherwise `texmake.toml` is looked for in the working directory only.
+//! [`load`] reads the file and parses it into
 //! the span-carrying `Raw*` types here: every leaf value remembers where it
 //! came from, so validation can later report `{path}:{line}:{column}` errors.
 //! Unknown keys are rejected while parsing (`deny_unknown_fields`).
@@ -34,7 +34,7 @@ use toml::Spanned;
 
 use crate::error::{ConfigError, Error};
 
-/// The file name texmake looks for while walking up from the working directory.
+/// The configuration file name texmake looks for in the working directory.
 pub const FILE_NAME: &str = "texmake.toml";
 
 /// A configuration file that was found, read and parsed successfully.
@@ -200,9 +200,9 @@ impl<'de> DeserializeSeed<'de> for UnknownKey {
 /// Find the configuration file to use.
 ///
 /// An explicit `--file` path is used as given (relative paths are resolved
-/// against `cwd`) and must exist. Otherwise `texmake.toml` is searched for
-/// from `cwd` upward. `cwd` is normally absolute, which makes the returned
-/// path absolute too.
+/// against `cwd`) and must exist. Otherwise `texmake.toml` is looked for in
+/// `cwd` only, never in a parent directory. `cwd` is normally absolute, which
+/// makes the returned path absolute too.
 pub fn discover(explicit: Option<&Path>, cwd: &Path) -> anyhow::Result<PathBuf> {
     if let Some(explicit) = explicit {
         let path = if explicit.is_absolute() {
@@ -216,14 +216,12 @@ pub fn discover(explicit: Option<&Path>, cwd: &Path) -> anyhow::Result<PathBuf> 
         bail!("configuration file not found: {}", path.display());
     }
 
-    for directory in cwd.ancestors() {
-        let candidate = directory.join(FILE_NAME);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
+    let candidate = cwd.join(FILE_NAME);
+    if candidate.is_file() {
+        return Ok(candidate);
     }
 
-    bail!("no {FILE_NAME} found from {} upward", cwd.display())
+    bail!("no {FILE_NAME} found in {}", cwd.display())
 }
 
 /// Read and strictly parse the configuration file at `path`.
@@ -292,14 +290,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovers_config_in_parent_directory() {
+    fn discovers_config_in_the_current_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("texmake.toml"), "").unwrap();
-        let sub = tmp.path().join("a/b");
-        std::fs::create_dir_all(&sub).unwrap();
         assert_eq!(
-            discover(None, &sub).unwrap(),
+            discover(None, tmp.path()).unwrap(),
             tmp.path().join("texmake.toml")
+        );
+    }
+
+    #[test]
+    fn ignores_config_in_a_parent_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("texmake.toml"), "").unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let error = discover(None, &sub).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("no texmake.toml found in {}", sub.display())
         );
     }
 

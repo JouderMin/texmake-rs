@@ -64,6 +64,15 @@ fn missing_config_exits_2() {
 }
 
 #[test]
+fn parent_directory_config_is_not_discovered() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.path("sub")).unwrap();
+    let out = f.cmd().current_dir(f.path("sub")).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no texmake.toml found"));
+}
+
+#[test]
 fn explicit_missing_config_exits_2() {
     let f = Fixture::new();
     let out = f.cmd().args(["--file", "nope.toml"]).output().unwrap();
