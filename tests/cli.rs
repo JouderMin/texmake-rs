@@ -1382,3 +1382,47 @@ fn init_refuses_directory_as_main_tex() {
     assert!(err.contains("main.tex"), "{err}");
     assert!(!f.path("texmake.toml").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn init_without_a_terminal_does_not_prompt() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f.cmd().arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for prompt in ["项目名", "语言", "引擎"] {
+        assert!(
+            !stdout.contains(prompt),
+            "unexpected `{prompt}` in {stdout}"
+        );
+    }
+    assert!(stdout.contains("created texmake.toml"), "{stdout}");
+    let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
+    assert!(toml.contains("xelatex"), "{toml}");
+    let main = std::fs::read_to_string(f.path("main.tex")).unwrap();
+    assert!(main.contains("\\usepackage[UTF8]{ctex}"), "{main}");
+}
+
+#[cfg(unix)]
+#[test]
+fn init_ignores_piped_stdin_without_blocking() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.path("texmake.toml")).unwrap();
+    std::fs::remove_file(f.path("main.tex")).unwrap();
+    let out = f
+        .cmd()
+        .arg("init")
+        .write_stdin("demo\nen\nlualatex\n")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("项目名"), "{stdout}");
+    // Piped answers are ignored: the defaults (zh, xelatex) still win.
+    let toml = std::fs::read_to_string(f.path("texmake.toml")).unwrap();
+    assert!(toml.contains("xelatex"), "{toml}");
+    let main = std::fs::read_to_string(f.path("main.tex")).unwrap();
+    assert!(main.contains("\\usepackage[UTF8]{ctex}"), "{main}");
+}

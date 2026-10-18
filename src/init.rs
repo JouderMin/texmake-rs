@@ -26,7 +26,7 @@
 //! instead; `quiet` suppresses all progress lines.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -34,6 +34,7 @@ use clap::ValueEnum;
 
 use crate::engine::Engine;
 use crate::error::{Error, usage};
+use crate::prompt;
 
 /// Document language of the generated `main.tex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -82,14 +83,21 @@ pub struct InitOptions {
 /// `dry_run` no directory or file is created; the planned actions are printed
 /// instead. `quiet` suppresses the progress lines.
 pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
-    if opts.engine == Engine::Pdflatex {
-        return Err(usage(
-            "`pdflatex` is not supported: the generated template uses `ctex` and `fontsetup`, which need `xelatex` or `lualatex`".to_owned(),
-        ));
-    }
-
     let dir = target_dir(&opts.dir)?;
-    let name = project_name(&dir, opts.name.as_deref())?;
+
+    // A terminal session always asks; the command-line values become the
+    // defaults. Pipes and `--dry-run` never block on a question.
+    let interactive = !opts.dry_run && std::io::stdin().is_terminal();
+    let (name, engine, language) = if interactive {
+        ask_options(&dir, opts)?
+    } else {
+        ensure_supported_engine(opts.engine)?;
+        (
+            project_name(&dir, opts.name.as_deref())?,
+            opts.engine,
+            opts.language,
+        )
+    };
 
     let config_path = dir.join("texmake.toml");
     let main_path = dir.join("main.tex");
@@ -116,7 +124,84 @@ pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
 
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create `{}`", dir.display()))?;
 
-    write_project(&dir, &name, opts, &write_new_file)
+    write_project(&dir, &name, engine, language, opts, &write_new_file)
+}
+
+/// `init` only generates `ctex`/`fontsetup` documents, which need a Unicode
+/// engine. `pdflatex` is rejected wherever an engine can still be chosen.
+fn ensure_supported_engine(engine: Engine) -> anyhow::Result<()> {
+    if engine == Engine::Pdflatex {
+        return Err(usage(
+            "`pdflatex` is not supported: the generated template uses `ctex` and `fontsetup`, which need `xelatex` or `lualatex`".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Ask for the project name, language and engine, in that order.
+///
+/// Each prompt offers the corresponding command-line value (or the target
+/// directory's name) as its default. Invalid answers are reported and the same
+/// question is asked again; end of input cancels before anything is written.
+fn ask_options(dir: &Path, opts: &InitOptions) -> anyhow::Result<(String, Engine, Language)> {
+    let dir_name = dir.file_name().and_then(|name| name.to_str());
+    let name_default = opts.name.as_deref().or(dir_name);
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout();
+
+    let name = prompt::ask(
+        "项目名",
+        name_default,
+        |value| {
+            let value = value.trim();
+            if value.is_empty() {
+                Err("the project name must not be empty".to_owned())
+            } else {
+                Ok(value.to_owned())
+            }
+        },
+        &mut stdin,
+        &mut stdout,
+    )?;
+
+    let language = prompt::ask(
+        "语言",
+        Some(opts.language.name()),
+        |value| match value.trim().to_lowercase().as_str() {
+            "zh" => Ok("zh".to_owned()),
+            "en" => Ok("en".to_owned()),
+            other => Err(format!("`{other}` is not a language; use `zh` or `en`")),
+        },
+        &mut stdin,
+        &mut stdout,
+    )?;
+
+    let engine = prompt::ask(
+        "引擎",
+        Some(opts.engine.command()),
+        |value| match value.trim().to_lowercase().as_str() {
+            "xelatex" => Ok("xelatex".to_owned()),
+            "lualatex" => Ok("lualatex".to_owned()),
+            "pdflatex" => {
+                Err("`pdflatex` is not supported; use `xelatex` or `lualatex`".to_owned())
+            }
+            other => Err(format!(
+                "`{other}` is not an engine; use `xelatex` or `lualatex`"
+            )),
+        },
+        &mut stdin,
+        &mut stdout,
+    )?;
+
+    let language = match language.as_str() {
+        "zh" => Language::Zh,
+        _ => Language::En,
+    };
+    let engine = match engine.as_str() {
+        "lualatex" => Engine::Lualatex,
+        _ => Engine::Xelatex,
+    };
+    Ok((name, engine, language))
 }
 
 /// Refuse targets that cannot be written as regular files, before the target
@@ -152,16 +237,14 @@ fn precheck_targets(config: &Path, main: &Path, gitignore: &Path) -> anyhow::Res
 fn write_project(
     dir: &Path,
     name: &str,
+    engine: Engine,
+    language: Language,
     opts: &InitOptions,
     writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
     let config_path = dir.join("texmake.toml");
     let files = [
-        (
-            dir.join("main.tex"),
-            "main.tex",
-            main_template(opts.language),
-        ),
+        (dir.join("main.tex"), "main.tex", main_template(language)),
         (dir.join(".gitignore"), ".gitignore", "/build/\n".to_owned()),
     ];
 
@@ -189,7 +272,7 @@ fn write_project(
 
         // The configuration goes last: a failure above never leaves a
         // configuration without its document files.
-        match writer(&config_path, &config_template(name, opts.engine)) {
+        match writer(&config_path, &config_template(name, engine)) {
             Ok(()) => {
                 created.push(config_path.clone());
                 if !opts.quiet {
@@ -363,7 +446,15 @@ mod tests {
             }
             write_new_file(path, content)
         };
-        let error = write_project(dir.path(), "t", &opts, &writer).unwrap_err();
+        let error = write_project(
+            dir.path(),
+            "t",
+            Engine::Xelatex,
+            Language::En,
+            &opts,
+            &writer,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("texmake.toml"), "{error}");
         assert!(!dir.path().join("texmake.toml").exists());
         assert!(!dir.path().join("main.tex").exists());
@@ -381,7 +472,17 @@ mod tests {
             }
             write_new_file(path, content)
         };
-        assert!(write_project(dir.path(), "t", &opts, &writer).is_err());
+        assert!(
+            write_project(
+                dir.path(),
+                "t",
+                Engine::Xelatex,
+                Language::En,
+                &opts,
+                &writer,
+            )
+            .is_err()
+        );
         assert!(!dir.path().join("texmake.toml").exists());
         assert!(!dir.path().join(".gitignore").exists());
         assert_eq!(

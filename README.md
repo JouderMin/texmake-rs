@@ -30,6 +30,8 @@ texmake clean         # 删除所有配方的输出目录
 
 init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。中文模板使用 article 文档类与 ctex 宏包，中英文模板都加载 fontsetup 默认选项，需要用 xelatex 或 lualatex 编译。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过；同名路径已存在但不是普通文件（例如目录）时报错，且不写任何文件。`--engine pdflatex` 报错：模板使用 ctex 与 fontsetup，需要 xelatex 或 lualatex。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
 
+在终端中运行时，init 依次询问项目名、语言和引擎。方括号内是该次默认值（命令选项或目录名）。直接回车接受默认值。输入不合法时，init 打印一行错误，并重新询问同一项。按 Ctrl-C 结束命令。标准输入结束（EOF）时，init 取消操作，不写任何文件，退出码为 2。标准输入不是终端时（例如管道或 CI），init 不询问，直接使用选项或默认值；`-n` 也跳过询问。`-q` 不隐藏提问。
+
 ## 配置
 
 texmake 只读取当前目录下的 `texmake.toml`，不向父目录查找。`--file <path>` 指定其他配置文件；相对路径按当前目录解析，文件必须存在。配置文件所在目录是项目根，所有相对路径按项目根解析。

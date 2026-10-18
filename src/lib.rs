@@ -30,6 +30,7 @@ pub mod engine;
 pub mod error;
 pub mod init;
 pub mod paths;
+pub mod prompt;
 pub mod recipe;
 pub mod up_to_date;
 pub mod validate;
