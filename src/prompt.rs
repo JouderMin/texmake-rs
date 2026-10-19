@@ -20,14 +20,15 @@
 //! and a select prompt for the language and the engine. [`collect`] keeps the
 //! order (project name, language, engine) and the defaults testable without a
 //! terminal. Cancelling a question (Esc, Ctrl-C or end of input) is reported as
-//! a usage error, so `init` exits with code 2 before writing anything.
+//! [`Error::Cancelled`], so `init` prints `已取消` and exits with code 130
+//! before writing anything.
 
 use anyhow::anyhow;
 use inquire::validator::Validation;
 use inquire::{CustomUserError, InquireError, Select, Text};
 
 use crate::engine::Engine;
-use crate::error::usage;
+use crate::error::Error;
 use crate::init::Language;
 
 /// Labels of the three questions.
@@ -149,15 +150,16 @@ fn validate_name(value: &str) -> Result<Validation, CustomUserError> {
 /// Map a cancelled or failed prompt to an error the caller can exit on.
 ///
 /// Esc and Ctrl-C are reported as cancellations by [`inquire`]; a closed input
-/// arrives as [`std::io::ErrorKind::UnexpectedEof`]. Both end the command with a
-/// usage error before anything is written.
+/// arrives as [`std::io::ErrorKind::UnexpectedEof`]. Both produce the plain
+/// [`Error::Cancelled`], which prints as `已取消` and exits with code 130
+/// before anything is written.
 fn cancelled(error: InquireError) -> anyhow::Error {
     match error {
         InquireError::OperationCanceled | InquireError::OperationInterrupted => {
-            usage("init cancelled: the questions were interrupted".to_owned())
+            Error::Cancelled.into()
         }
-        InquireError::IO(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-            usage("init cancelled: the input ended".to_owned())
+        InquireError::IO(ref io) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
+            Error::Cancelled.into()
         }
         other => anyhow!("cannot ask the init questions: {other}"),
     }
@@ -166,7 +168,7 @@ fn cancelled(error: InquireError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
+    use crate::error::usage;
 
     #[derive(Debug)]
     struct FakePrompter {
@@ -279,33 +281,35 @@ mod tests {
         }
     }
 
-    fn usage_of(error: anyhow::Error) -> Error {
+    fn texmake_error(error: anyhow::Error) -> Error {
         error.downcast::<Error>().expect("a texmake error")
     }
 
-    #[test]
-    fn cancelled_maps_escape_to_a_usage_error() {
-        let error = usage_of(cancelled(InquireError::OperationCanceled));
-        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
-        assert_eq!(error.exit_code(), 2);
+    /// Assert that `error` is the plain cancellation error: no `error: ` prefix,
+    /// the message `已取消`, and exit code 130.
+    fn assert_cancelled(error: Error) {
+        assert!(matches!(&error, Error::Cancelled), "got {error:?}");
+        assert_eq!(error.exit_code(), 130);
+        assert_eq!(error.to_string(), "已取消");
     }
 
     #[test]
-    fn cancelled_maps_ctrl_c_to_a_usage_error() {
-        let error = usage_of(cancelled(InquireError::OperationInterrupted));
-        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
-        assert_eq!(error.exit_code(), 2);
+    fn cancelled_maps_escape_to_cancelled() {
+        assert_cancelled(texmake_error(cancelled(InquireError::OperationCanceled)));
     }
 
     #[test]
-    fn cancelled_maps_end_of_input_to_a_usage_error() {
+    fn cancelled_maps_ctrl_c_to_cancelled() {
+        assert_cancelled(texmake_error(cancelled(InquireError::OperationInterrupted)));
+    }
+
+    #[test]
+    fn cancelled_maps_end_of_input_to_cancelled() {
         let eof = InquireError::IO(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "end of input",
         ));
-        let error = usage_of(cancelled(eof));
-        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
-        assert_eq!(error.exit_code(), 2);
+        assert_cancelled(texmake_error(cancelled(eof)));
     }
 
     #[test]
@@ -314,7 +318,9 @@ mod tests {
         prompter.fail_at = Some("name");
         let error = collect(&mut prompter, defaults()).expect_err("cancelled");
         assert_eq!(prompter.calls, ["name"]);
-        assert!(matches!(usage_of(error), Error::Usage(message) if message.contains("cancelled")));
+        assert!(
+            matches!(texmake_error(error), Error::Usage(message) if message.contains("cancelled"))
+        );
     }
 
     #[test]
@@ -323,7 +329,9 @@ mod tests {
         prompter.fail_at = Some("language");
         let error = collect(&mut prompter, defaults()).expect_err("cancelled");
         assert_eq!(prompter.calls, ["name", "language"]);
-        assert!(matches!(usage_of(error), Error::Usage(message) if message.contains("cancelled")));
+        assert!(
+            matches!(texmake_error(error), Error::Usage(message) if message.contains("cancelled"))
+        );
     }
 
     #[test]

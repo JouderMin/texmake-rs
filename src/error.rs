@@ -16,12 +16,13 @@
 
 //! Error types shared by every texmake subcommand.
 //!
-//! Domain failures (`Usage`, `Config`, `ToolMissing`, `BuildFailed`) are
-//! defined here with `thiserror`, and every one of them knows its process exit
-//! code: usage/configuration problems exit with 2, build failures (missing
-//! tools, failed steps) with 1. Environment and I/O failures are not modelled
-//! as a variant; the code that hits them attaches an `anyhow` context instead,
-//! and [`Error::exit_code`] keeps exit codes for the domain errors.
+//! Domain failures (`Usage`, `Config`, `ToolMissing`, `BuildFailed`,
+//! `Cancelled`) are defined here with `thiserror`, and every one of them knows
+//! its process exit code: usage/configuration problems exit with 2, build
+//! failures (missing tools, failed steps) with 1, and a cancelled interactive
+//! prompt with 130. Environment and I/O failures are not modelled as a variant;
+//! the code that hits them attaches an `anyhow` context instead, and
+//! [`Error::exit_code`] keeps exit codes for the domain errors.
 
 use std::path::PathBuf;
 
@@ -40,6 +41,9 @@ pub enum Error {
     /// A build step ran and failed.
     #[error("{0}")]
     BuildFailed(#[from] BuildFailed),
+    /// The user cancelled an interactive prompt (Esc, Ctrl-C or end of input).
+    #[error("已取消")]
+    Cancelled,
 }
 
 impl Error {
@@ -48,6 +52,7 @@ impl Error {
         match self {
             Error::Usage(_) | Error::Config(_) => 2,
             Error::ToolMissing(_) | Error::BuildFailed(_) => 1,
+            Error::Cancelled => 130,
         }
     }
 }
