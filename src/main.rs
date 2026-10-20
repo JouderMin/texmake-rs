@@ -14,11 +14,41 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! texmake entry point.
 //!
-//! `main` only delegates to [`texmake::cli::run`]; everything else lives in the
-//! library crate.
+//! The crate ships a single binary: `main` parses the command line, delegates
+//! to [`cli::run`] and turns the result into the process exit code. The modules
+//! below hold the configuration model, validation, step resolution and the
+//! build pipeline.
+
+mod build;
+mod clean;
+mod cli;
+mod config;
+mod engine;
+mod error;
+mod init;
+mod paths;
+mod prompt;
+mod recipe;
+mod up_to_date;
+mod validate;
+mod vars;
+
+use anyhow::Context;
+
+use crate::cli::Cli;
+use crate::config::LoadedConfig;
+
+/// Discover and load the project configuration for `cli`.
+fn load_project(cli: &Cli) -> anyhow::Result<LoadedConfig> {
+    let cwd = std::env::current_dir().context("cannot read working directory")?;
+    let path = config::discover(cli.file.as_deref(), &cwd)?;
+    config::load(&path)
+}
 
 fn main() {
-    std::process::exit(texmake::cli::run());
+    std::process::exit(cli::run());
 }
