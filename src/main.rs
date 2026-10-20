@@ -37,18 +37,6 @@ mod up_to_date;
 mod validate;
 mod vars;
 
-use anyhow::Context;
-
-use crate::cli::Cli;
-use crate::config::LoadedConfig;
-
-/// Discover and load the project configuration for `cli`.
-fn load_project(cli: &Cli) -> anyhow::Result<LoadedConfig> {
-    let cwd = std::env::current_dir().context("cannot read working directory")?;
-    let path = config::discover(cli.file.as_deref(), &cwd)?;
-    config::load(&path)
-}
-
 fn main() {
     std::process::exit(cli::run());
 }

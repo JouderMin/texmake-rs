@@ -23,11 +23,12 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 use crate::build::{self, BuildOptions};
 use crate::clean;
-use crate::config::LoadedConfig;
+use crate::config::{self, LoadedConfig};
 use crate::engine::Engine;
 use crate::error::Error;
 use crate::init::{self, Language};
@@ -121,6 +122,13 @@ pub fn run() -> i32 {
     }
 }
 
+/// Discover and load the project configuration for `cli`.
+fn load_project(cli: &Cli) -> anyhow::Result<LoadedConfig> {
+    let cwd = std::env::current_dir().context("cannot read working directory")?;
+    let path = config::discover(cli.file.as_deref(), &cwd)?;
+    config::load(&path)
+}
+
 fn execute(cli: Cli) -> anyhow::Result<()> {
     // `init` creates a new project and must not require an existing
     // configuration; every other command loads the project first.
@@ -141,7 +149,7 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
         };
         return init::run_init(&options);
     }
-    let loaded = crate::load_project(&cli)?;
+    let loaded = load_project(&cli)?;
     match &cli.command {
         Some(Command::Check) => {
             let project = validate::build_plan(&loaded).map_err(Error::from)?;
