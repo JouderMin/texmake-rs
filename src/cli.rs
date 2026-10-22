@@ -103,6 +103,8 @@ pub enum Command {
 
 /// Parse the command line and run texmake; returns the process exit code.
 pub fn run() -> i32 {
+    // `parse` prints the help, the version or the usage error itself and then
+    // exits the process, so a parse failure never reaches `execute`.
     let cli = Cli::parse();
     match execute(cli) {
         Ok(()) => 0,
