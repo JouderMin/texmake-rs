@@ -216,9 +216,9 @@ pub fn discover(explicit: Option<&Path>, cwd: &Path) -> anyhow::Result<PathBuf> 
         bail!("configuration file not found: {}", path.display());
     }
 
-    let candidate = cwd.join(FILE_NAME);
-    if candidate.is_file() {
-        return Ok(candidate);
+    let path = cwd.join(FILE_NAME);
+    if path.is_file() {
+        return Ok(path);
     }
 
     bail!("no {FILE_NAME} found in {}", cwd.display())
