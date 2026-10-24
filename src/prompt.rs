@@ -91,8 +91,11 @@ pub struct InquirePrompter;
 
 impl Prompter for InquirePrompter {
     fn ask_name(&mut self, default: &str) -> anyhow::Result<String> {
+        // `with_default` leaves the field empty and returns the default on an
+        // empty submit, so typing replaces it; `with_initial_value` would
+        // pre-fill the field and make typed text append to it.
         Text::new(NAME_PROMPT)
-            .with_initial_value(default)
+            .with_default(default)
             .with_validator(validate_name)
             .prompt()
             .map(|name| name.trim().to_owned())
