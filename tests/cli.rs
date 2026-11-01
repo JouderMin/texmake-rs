@@ -18,6 +18,8 @@
 
 mod common;
 
+use std::path::PathBuf;
+
 use common::Fixture;
 
 #[test]
@@ -1096,4 +1098,266 @@ fn init_requires_a_terminal() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("init needs a terminal"), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------------
+
+/// Overwrite the root configuration with a `[workspace]` table.
+fn write_workspace(f: &Fixture, members: &[&str]) {
+    let list = members
+        .iter()
+        .map(|member| format!("\"{member}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    f.write_toml(&format!("[workspace]\nmembers = [{list}]\n"));
+}
+
+/// Write a minimal project configuration into `dir`.
+fn write_member(f: &Fixture, dir: &str, name: &str) {
+    f.write(
+        &format!("{dir}/texmake.toml"),
+        &format!(
+            "[project]\nname = \"{name}\"\nmain = \"main.tex\"\n\
+             [recipes.release]\nsteps = [{{ latex = \"xelatex\" }}]\n"
+        ),
+    );
+    f.write(
+        &format!("{dir}/main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nHi.\n\\end{document}\n",
+    );
+}
+
+/// A fake xelatex that writes `build/main.pdf`, so builds produce a PDF.
+fn fake_pdf_tool(f: &Fixture) -> PathBuf {
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${arg#-output-directory=}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\n",
+    )
+}
+
+#[test]
+fn workspace_build_builds_every_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    fake_pdf_tool(&f);
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(f.path("paper/build/main.pdf").is_file());
+    assert!(f.path("slides/build/main.pdf").is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("==> slides"), "{stdout}");
+}
+
+#[test]
+fn workspace_build_stops_at_the_first_failing_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["a", "b", "c"]);
+    write_member(&f, "a", "a");
+    f.write(
+        "b/texmake.toml",
+        "[project]\nname = \"b\"\nmain = \"main.tex\"\n[recipes.release]\nsteps = [{ run = \"exit 7\" }]\n",
+    );
+    f.write("b/main.tex", "\\documentclass{article}\n");
+    write_member(&f, "c", "c");
+    fake_pdf_tool(&f);
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "{:?}", out);
+    assert!(f.path("a/build/main.pdf").is_file());
+    assert!(!f.path("c/build").exists());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member b:"), "{stderr}");
+    assert!(stderr.contains("exit code: 7"), "{stderr}");
+}
+
+#[test]
+fn workspace_check_prints_every_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("==> slides"), "{stdout}");
+    assert!(stdout.contains("project: paper"), "{stdout}");
+    assert!(stdout.contains("project: slides"), "{stdout}");
+}
+
+#[test]
+fn workspace_check_reports_an_invalid_member_with_its_path() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    f.write(
+        "slides/texmake.toml",
+        "[project]\nname = \"slides\"\nmain = \"main.tex\"\nbogus = 1\n[recipes.release]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member slides:"), "{stderr}");
+    assert!(stderr.contains("slides/texmake.toml"), "{stderr}");
+}
+
+#[test]
+fn workspace_clean_removes_every_member_output() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    f.write("paper/build/main.pdf", "pdf");
+    f.write("slides/build/main.pdf", "pdf");
+
+    let out = f.cmd().arg("clean").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(!f.path("paper/build").exists());
+    assert!(!f.path("slides/build").exists());
+    assert!(f.path("paper/main.tex").is_file());
+    assert!(f.path("slides/main.tex").is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("==> slides"), "{stdout}");
+}
+
+#[test]
+fn workspace_rejects_an_absolute_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["/tmp/elsewhere"]);
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("must be a relative path"), "{stderr}");
+}
+
+#[test]
+fn workspace_rejects_a_member_outside_the_root() {
+    let f = Fixture::new();
+    write_workspace(&f, &["../elsewhere"]);
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must stay inside the workspace root"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn workspace_rejects_duplicate_members() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "./paper"]);
+    write_member(&f, "paper", "paper");
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("duplicate workspace member"), "{stderr}");
+}
+
+#[test]
+fn workspace_requires_each_member_configuration() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    f.write("paper/main.tex", "\\documentclass{article}\n");
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("has no texmake.toml"), "{stderr}");
+}
+
+#[test]
+fn workspace_rejects_nested_workspaces() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    f.write("paper/texmake.toml", "[workspace]\nmembers = []\n");
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nested workspaces are not supported"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("member paper:"), "{stderr}");
+}
+
+#[test]
+fn an_empty_workspace_refuses_to_build() {
+    let f = Fixture::new();
+    write_workspace(&f, &[]);
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("has no members"), "{stderr}");
+}
+
+#[test]
+fn project_and_workspace_tables_conflict() {
+    let f = Fixture::new();
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [workspace]\nmembers = []\n\
+         [recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+    );
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot define both"), "{stderr}");
+}
+
+#[test]
+fn workspace_quiet_suppresses_the_member_headings() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    write_member(&f, "paper", "paper");
+
+    let out = f.cmd().args(["-q", "check"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("==> paper"), "{stdout}");
+    // `check` always reports the member; only the heading is quiet.
+    assert!(stdout.contains("project: paper"), "{stdout}");
+}
+
+#[test]
+fn workspace_dry_run_prints_member_commands_without_building() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    write_member(&f, "paper", "paper");
+
+    let out = f.cmd().args(["-n", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("xelatex"), "{stdout}");
+    assert!(!f.path("paper/build").exists());
 }

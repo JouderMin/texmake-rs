@@ -27,7 +27,9 @@ use std::path::{Component, Path, PathBuf};
 
 use toml::Spanned;
 
-use crate::config::{LoadedConfig, RawRecipe, RawStep, RawTool};
+use crate::config::{
+    FILE_NAME, LoadedConfig, LoadedProject, LoadedWorkspace, RawRecipe, RawStep, RawTool,
+};
 use crate::engine::Engine;
 use crate::error::ConfigError;
 use crate::paths;
@@ -133,7 +135,7 @@ struct ToolSpec {
 /// Validate `loaded` and resolve it into a build plan.
 ///
 /// Errors carry the file, line and column of the offending value.
-pub fn build_plan(loaded: &LoadedConfig) -> Result<Project, ConfigError> {
+pub fn build_plan(loaded: &LoadedProject) -> Result<Project, ConfigError> {
     let root = paths::normalize(&loaded.root);
     let root = root.canonicalize().unwrap_or(root);
 
@@ -199,7 +201,7 @@ fn derive_main_stem(main: &str) -> String {
 }
 
 fn build_recipe(
-    loaded: &LoadedConfig,
+    loaded: &LoadedProject,
     project: &ProjectMeta<'_>,
     name: &str,
     raw_recipe: &RawRecipe,
@@ -262,7 +264,7 @@ fn build_recipe(
 /// names do not depend on a recipe's values; this makes `check` report a bad
 /// variable in an unused tool instead of silently accepting it.
 fn validate_tool_templates(
-    loaded: &LoadedConfig,
+    loaded: &LoadedProject,
     tools: &BTreeMap<String, ToolSpec>,
     project: &ProjectMeta<'_>,
 ) -> Result<(), ConfigError> {
@@ -297,7 +299,7 @@ fn validate_tool_templates(
 /// Check that the main document is a direct `.tex` child of the project root
 /// and that it exists.
 fn validate_main(
-    loaded: &LoadedConfig,
+    loaded: &LoadedProject,
     root: &Path,
     main: &str,
     span: Range<usize>,
@@ -331,7 +333,7 @@ fn validate_main(
 }
 
 fn build_step(
-    loaded: &LoadedConfig,
+    loaded: &LoadedProject,
     tools: &BTreeMap<String, ToolSpec>,
     vars: &Vars<'_>,
     raw_step: &Spanned<RawStep>,
@@ -438,7 +440,7 @@ fn build_step(
 
 /// Render a list of argument templates, reporting each argument's own span.
 fn render_args(
-    loaded: &LoadedConfig,
+    loaded: &LoadedProject,
     vars: &Vars<'_>,
     args: &[Spanned<String>],
 ) -> Result<Vec<String>, ConfigError> {
@@ -449,7 +451,7 @@ fn render_args(
 
 /// Render one template, turning a render error into a positioned config error.
 fn render_at(
-    loaded: &LoadedConfig,
+    loaded: &LoadedProject,
     template: &str,
     vars: &Vars<'_>,
     is_run: bool,
@@ -459,7 +461,11 @@ fn render_at(
 }
 
 /// Require a `biber`/`bibtex`/`makeindex` value to be `true`.
-fn ensure_true(loaded: &LoadedConfig, value: &Spanned<bool>, key: &str) -> Result<(), ConfigError> {
+fn ensure_true(
+    loaded: &LoadedProject,
+    value: &Spanned<bool>,
+    key: &str,
+) -> Result<(), ConfigError> {
     if *value.get_ref() {
         Ok(())
     } else {
@@ -468,7 +474,7 @@ fn ensure_true(loaded: &LoadedConfig, value: &Spanned<bool>, key: &str) -> Resul
 }
 
 /// Resolve every `[tools.<name>]` definition.
-fn parse_tools(loaded: &LoadedConfig) -> Result<BTreeMap<String, ToolSpec>, ConfigError> {
+fn parse_tools(loaded: &LoadedProject) -> Result<BTreeMap<String, ToolSpec>, ConfigError> {
     let mut tools = BTreeMap::new();
     for (name, spanned) in &loaded.raw.tools {
         let tool = match spanned.get_ref() {
@@ -495,14 +501,125 @@ fn parse_tools(loaded: &LoadedConfig) -> Result<BTreeMap<String, ToolSpec>, Conf
     Ok(tools)
 }
 
+/// A validated workspace root.
+#[derive(Debug)]
+pub struct Workspace {
+    /// Absolute, canonical workspace root (the directory of the root config).
+    pub root: PathBuf,
+    /// Member projects, in the order they are listed.
+    pub members: Vec<WorkspaceMember>,
+}
+
+/// One validated workspace member.
+#[derive(Debug)]
+pub struct WorkspaceMember {
+    /// The member path exactly as written in `members`; used as the
+    /// `==> {member}` heading and in error context.
+    pub display: String,
+    /// The member's validated project.
+    pub project: Project,
+}
+
+/// Validate a workspace root and every project it lists.
+///
+/// Members are resolved relative to the workspace root, must stay inside it,
+/// must be unique, must be directories that contain a `texmake.toml`, and that
+/// file must describe a project: nested workspaces are rejected. Member
+/// failures carry `member {name}: ` context in front of the member's own
+/// positioned error.
+pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigError> {
+    let span = loaded.workspace.members.span();
+    let root = loaded.root.canonicalize().map_err(|error| {
+        loaded.error_at(
+            span.clone(),
+            format!("cannot resolve the workspace root: {error}"),
+        )
+    })?;
+    let mut members = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for indexed in loaded.workspace.members.get_ref() {
+        let display = indexed.get_ref().clone();
+        let at = indexed.span();
+        if display.is_empty() {
+            return Err(loaded.error_at(at, "a workspace member path cannot be empty"));
+        }
+        let relative = Path::new(&display);
+        if relative.is_absolute() {
+            return Err(loaded.error_at(
+                at,
+                format!("workspace member `{display}` must be a relative path"),
+            ));
+        }
+        let dir = paths::normalize(&root.join(relative));
+        if dir == root || !dir.starts_with(&root) {
+            return Err(loaded.error_at(
+                at,
+                format!("workspace member `{display}` must stay inside the workspace root"),
+            ));
+        }
+        if !seen.insert(dir.clone()) {
+            return Err(loaded.error_at(at, format!("duplicate workspace member `{display}`")));
+        }
+        if !dir.is_dir() {
+            return Err(loaded.error_at(
+                at,
+                format!("workspace member `{display}` is not a directory"),
+            ));
+        }
+        let config_path = dir.join(FILE_NAME);
+        if !config_path.is_file() {
+            return Err(loaded.error_at(
+                at,
+                format!("workspace member `{display}` has no {FILE_NAME}"),
+            ));
+        }
+        let config = crate::config::load(&config_path)
+            .map_err(|error| member_error(loaded, at.clone(), &display, &error))?;
+        let member = match config {
+            LoadedConfig::Project(project) => project,
+            LoadedConfig::Workspace(nested) => {
+                let reason = nested.error_at(
+                    nested.workspace.members.span(),
+                    "nested workspaces are not supported",
+                );
+                return Err(loaded.error_at(at, format!("member {display}: {reason}")));
+            }
+        };
+        let project = build_plan(&member)
+            .map_err(|reason| loaded.error_at(at, format!("member {display}: {reason}")))?;
+        members.push(WorkspaceMember { display, project });
+    }
+
+    Ok(Workspace { root, members })
+}
+
+/// Turn a member configuration failure into a positioned workspace error.
+fn member_error(
+    loaded: &LoadedWorkspace,
+    span: Range<usize>,
+    display: &str,
+    error: &anyhow::Error,
+) -> ConfigError {
+    match error.downcast_ref::<crate::error::Error>() {
+        Some(crate::error::Error::Config(config)) => {
+            loaded.error_at(span, format!("member {display}: {config}"))
+        }
+        _ => loaded.error_at(span, format!("member {display}: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn load_config(dir: &Path, toml: &str) -> LoadedConfig {
+    fn load_config(dir: &Path, toml: &str) -> LoadedProject {
         let path = dir.join("texmake.toml");
         std::fs::write(&path, toml).unwrap();
-        crate::config::load(&path).unwrap()
+        match crate::config::load(&path).unwrap() {
+            LoadedConfig::Project(project) => project,
+            LoadedConfig::Workspace(_) => panic!("expected a project configuration"),
+        }
     }
 
     #[test]
@@ -591,7 +708,10 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = crate::config::load(&path).unwrap();
+        let loaded = match crate::config::load(&path).unwrap() {
+            LoadedConfig::Project(project) => project,
+            LoadedConfig::Workspace(_) => panic!("expected a project configuration"),
+        };
         let project = build_plan(&loaded).unwrap();
         assert_eq!(project.root, tmp.path().canonicalize().unwrap());
         assert_eq!(project.recipes["a"].output_path, project.root.join("build"));

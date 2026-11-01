@@ -28,9 +28,10 @@ use inquire::{CustomUserError, InquireError, Select, Text};
 
 use crate::engine::Engine;
 use crate::error::Error;
-use crate::init::{DocType, Font, font_options};
+use crate::init::{DocType, Font, ProjectType, font_options};
 
 /// Labels of the questions.
+const PROJECT_TYPE_PROMPT: &str = "项目类型";
 const NAME_PROMPT: &str = "项目名";
 const DOC_TYPE_PROMPT: &str = "文档类型";
 const ENGINE_PROMPT: &str = "引擎";
@@ -49,6 +50,14 @@ fn ctex_options() -> [&'static str; 2] {
 /// The engine choices, in display order.
 fn engine_choices() -> Vec<Engine> {
     vec![Engine::Pdflatex, Engine::Xelatex, Engine::Lualatex]
+}
+
+/// The starting cursor of the project type prompt for `default`.
+fn project_type_cursor(default: ProjectType) -> usize {
+    match default {
+        ProjectType::Project => 0,
+        ProjectType::Workspace => 1,
+    }
 }
 
 /// The starting cursor of the document type prompt for `default`.
@@ -96,6 +105,7 @@ pub struct Answers {
 /// Asks the questions of `init`; implemented by [`InquirePrompter`] in
 /// production and by a fake in the tests.
 pub trait Prompter {
+    fn ask_project_type(&mut self, default: ProjectType) -> anyhow::Result<ProjectType>;
     fn ask_name(&mut self, default: &str) -> anyhow::Result<String>;
     fn ask_doc_type(&mut self, default: DocType) -> anyhow::Result<DocType>;
     fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine>;
@@ -107,6 +117,13 @@ pub trait Prompter {
 pub struct InquirePrompter;
 
 impl Prompter for InquirePrompter {
+    fn ask_project_type(&mut self, default: ProjectType) -> anyhow::Result<ProjectType> {
+        Select::new(PROJECT_TYPE_PROMPT, ProjectType::OPTIONS.to_vec())
+            .with_starting_cursor(project_type_cursor(default))
+            .prompt()
+            .map_err(cancelled)
+    }
+
     fn ask_name(&mut self, default: &str) -> anyhow::Result<String> {
         // `with_default` leaves the field empty and returns the default on an
         // empty submit, so typing replaces it; `with_initial_value` would
@@ -218,6 +235,7 @@ mod tests {
     #[derive(Debug)]
     struct FakePrompter {
         calls: Vec<&'static str>,
+        project_type_default: Option<ProjectType>,
         doc_type_default: Option<DocType>,
         engine_default: Option<Engine>,
         font_engine: Option<Engine>,
@@ -234,6 +252,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: Vec::new(),
+                project_type_default: None,
                 doc_type_default: None,
                 engine_default: None,
                 font_engine: None,
@@ -249,6 +268,15 @@ mod tests {
     }
 
     impl Prompter for FakePrompter {
+        fn ask_project_type(&mut self, default: ProjectType) -> anyhow::Result<ProjectType> {
+            self.calls.push("type");
+            self.project_type_default = Some(default);
+            if self.fail_at == Some("type") {
+                return Err(usage("cancelled".to_owned()));
+            }
+            Ok(ProjectType::Project)
+        }
+
         fn ask_name(&mut self, _default: &str) -> anyhow::Result<String> {
             self.calls.push("name");
             Ok("thesis".to_owned())
@@ -374,6 +402,16 @@ mod tests {
                 Err("项目名不能包含路径分隔符".to_owned())
             );
         }
+    }
+
+    #[test]
+    fn the_project_type_choices_are_project_then_workspace() {
+        assert_eq!(
+            ProjectType::OPTIONS.map(|project_type| project_type.to_string()),
+            ["项目", "工作区"]
+        );
+        assert_eq!(project_type_cursor(ProjectType::Project), 0);
+        assert_eq!(project_type_cursor(ProjectType::Workspace), 1);
     }
 
     #[test]

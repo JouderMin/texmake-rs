@@ -15,7 +15,7 @@ cargo build --release
 ## 快速开始
 
 ```sh
-texmake init          # 交互式创建项目目录（texmake.toml、main.tex 和 .gitignore）
+texmake init          # 交互式创建项目或工作区
 cd <项目名>
 texmake               # 按默认配方构建，输出 build/main.pdf
 texmake check         # 检查配置
@@ -24,15 +24,18 @@ texmake clean         # 删除所有配方的输出目录
 
 `texmake init` 不带参数，只能在终端中运行。命令依次询问：
 
-1. 项目名：文本输入。不能为空或只有空白，也不能是 `.`、`..` 或包含 `/`、`\`。确认后立即在当前目录创建同名目录；目录已存在时报错，退出码 2，不再询问后续问题。
-2. 文档类型：`article` 或 `book`。
-3. 引擎：`pdflatex`、`xelatex` 或 `lualatex`。
-4. 字体：随引擎变化。`pdflatex` 提供 `Computer Modern` 与 `Latin Modern`；`xelatex` 与 `lualatex` 提供 `New Computer Modern`、`New Computer Modern Sans`、`Concrete`、`Euler`、`Fira` 与 `STIX Two`。
-5. 中文支持：`是` 或 `否`。选 `是` 时在导言区末尾加入 `\usepackage[UTF8]{ctex}`。
+1. 项目类型：`项目` 或 `工作区`。
+2. 项目名：文本输入。不能为空或只有空白，也不能是 `.`、`..` 或包含 `/`、`\`。确认后立即在当前目录创建同名目录；目录已存在时报错，退出码 2，不再询问后续问题。
+3. 文档类型：`article` 或 `book`。
+4. 引擎：`pdflatex`、`xelatex` 或 `lualatex`。
+5. 字体：随引擎变化。`pdflatex` 提供 `Computer Modern` 与 `Latin Modern`；`xelatex` 与 `lualatex` 提供 `New Computer Modern`、`New Computer Modern Sans`、`Concrete`、`Euler`、`Fira` 与 `STIX Two`。
+6. 中文支持：`是` 或 `否`。选 `是` 时在导言区末尾加入 `\usepackage[UTF8]{ctex}`。
+
+选择 `工作区` 时只询问第 1、2 项，生成 `texmake.toml` 与 `.gitignore`，不生成 `main.tex`。`texmake.toml` 的内容为 `[workspace]` 表和空的 `members`。
 
 选择 `Computer Modern` 且启用中文支持时报错，退出码 2：该字体不支持中文。请改用 `Latin Modern`，或改用 `xelatex`/`lualatex` 并选择 Unicode 字体。报错与取消时删除本次创建的空目录。
 
-init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，`.gitignore` 的内容为 `/build/`。`article` 使用 `\documentclass{article}`；`book` 使用 `\documentclass{book}`，正文以 `\chapter` 开头。字体行位于导言区，`ctex` 行位于其后。
+项目生成 `texmake.toml`、`main.tex` 和 `.gitignore`，`.gitignore` 的内容为 `/build/`。`article` 使用 `\documentclass{article}`；`book` 使用 `\documentclass{book}`，正文以 `\chapter` 开头。字体行位于导言区，`ctex` 行位于其后。
 
 按 Esc 或 Ctrl-C 取消，标准输入结束（EOF）也取消。取消时只输出 `已取消`，退出码 130，不写文件。标准输入不是终端时（例如管道或 CI），init 直接报错，退出码 2，不写文件。
 
@@ -72,6 +75,21 @@ steps = [{ latex = "xelatex", args = ["-draftmode"] }]
 `[project]` 的键：`name` 和 `main` 必需；`output` 可选，默认 `build`；`default` 可选，指定默认配方。每个配方的 `steps` 必须非空；配方可用 `main` 和 `output` 覆盖项目级设置。
 
 未知的键名、缺失的必需键、类型错误和重复键名都是配置错误。配置错误报告文件路径、行、列和原因。
+
+## 工作区
+
+工作区在根目录的 `texmake.toml` 中列出成员项目，一次构建、检查或清理多个项目：
+
+```toml
+[workspace]
+members = ["paper", "slides"]
+```
+
+成员路径相对于工作区根，必须位于根内，不能重复。每个成员目录要有自己的 `texmake.toml`，并描述一个项目；成员不能是工作区，不支持嵌套。工作区根不能定义 `[project]`、`[recipes]` 或 `[tools]`。
+
+成员按 `members` 的顺序执行。每个成员开始前打印 `==> <成员路径>`；`-q` 不打印。任一成员失败时停止后续成员，错误信息带 `member <成员路径>:` 前缀。`-f`、`-B`、`-n`、`-v`、`-q` 对所有成员生效；`-n` 不创建目录，也不检查工具。各成员的日志写入自己的 `<输出目录>/texmake.log`。
+
+`members = []` 是合法配置，但构建、检查和清理会报错，退出码 2。
 
 ## 命令
 
@@ -220,6 +238,7 @@ pandoc = "pandoc"
 - 主 PDF 的文件名是主文档名去掉扩展名后加 `.pdf`。
 - 支持 macOS 和 Linux；Windows 为尽力支持。
 - init 仅支持交互式终端，不支持管道或 CI。
+- 工作区不支持嵌套，也没有 `-p` 成员选择选项；成员串行执行，不并行。
 
 ## 许可证
 

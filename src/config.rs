@@ -38,22 +38,47 @@ use crate::error::{ConfigError, Error};
 pub const FILE_NAME: &str = "texmake.toml";
 
 /// A configuration file that was found, read and parsed successfully.
+///
+/// A file describes either one project (`[project]`) or a workspace root
+/// (`[workspace]`); [`load`] decides which shape it has.
 #[derive(Debug)]
-pub struct LoadedConfig {
+pub enum LoadedConfig {
+    /// A single project.
+    Project(LoadedProject),
+    /// A workspace root; its members are resolved by validation.
+    Workspace(LoadedWorkspace),
+}
+
+/// A parsed project configuration.
+#[derive(Debug)]
+pub struct LoadedProject {
     /// Absolute path of the configuration file.
     pub path: PathBuf,
     /// Project root: the directory that contains the configuration file.
     pub root: PathBuf,
     /// File contents; kept so spans can be turned into line/column pairs.
     pub source: String,
-    /// Parsed configuration with source spans preserved.
-    pub raw: RawConfig,
+    /// Parsed project configuration with source spans preserved.
+    pub raw: RawProjectConfig,
 }
 
-/// The whole `texmake.toml` document.
+/// A parsed workspace-root configuration.
+#[derive(Debug)]
+pub struct LoadedWorkspace {
+    /// Absolute path of the configuration file.
+    pub path: PathBuf,
+    /// Workspace root: the directory that contains the configuration file.
+    pub root: PathBuf,
+    /// File contents; kept so spans can be turned into line/column pairs.
+    pub source: String,
+    /// The `[workspace]` table.
+    pub workspace: RawWorkspace,
+}
+
+/// A `texmake.toml` that describes one project.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RawConfig {
+pub struct RawProjectConfig {
     /// The mandatory `[project]` table.
     pub project: RawProject,
     /// `[recipes.<name>]` tables; at least one is required semantically.
@@ -62,6 +87,33 @@ pub struct RawConfig {
     /// `[tools.<name>]` definitions, referenced by `tool` steps.
     #[serde(default)]
     pub tools: BTreeMap<String, Spanned<RawTool>>,
+}
+
+/// The `[workspace]` table of a workspace root.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawWorkspace {
+    /// Member directories, relative to the workspace root.
+    pub members: Spanned<Vec<Spanned<String>>>,
+}
+
+/// The whole document, before the project/workspace shape is decided.
+///
+/// Both tables are optional here so their coexistence can be reported as a
+/// positioned semantic error instead of a bare `toml` "missing field" error.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFile {
+    /// The `[project]` table, when present.
+    project: Option<RawProject>,
+    /// The `[workspace]` table, when present.
+    workspace: Option<RawWorkspace>,
+    /// `[recipes.<name>]` tables; only a project may define them.
+    #[serde(default)]
+    recipes: BTreeMap<String, RawRecipe>,
+    /// `[tools.<name>]` definitions; only a project may define them.
+    #[serde(default)]
+    tools: BTreeMap<String, Spanned<RawTool>>,
 }
 
 /// The `[project]` table.
@@ -225,11 +277,15 @@ pub fn discover(explicit: Option<&Path>, cwd: &Path) -> anyhow::Result<PathBuf> 
 }
 
 /// Read and strictly parse the configuration file at `path`.
+///
+/// The returned [`LoadedConfig`] tells whether the file describes a project or
+/// a workspace root; a file that mixes both tables, or defines neither, is a
+/// positioned configuration error.
 pub fn load(path: &Path) -> anyhow::Result<LoadedConfig> {
     let path = absolute(path);
     let source = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
-    let raw: RawConfig = toml::from_str(&source).map_err(|source| {
+    let file: RawFile = toml::from_str(&source).map_err(|source| {
         Error::Config(ConfigError::Toml {
             path: path.clone(),
             source,
@@ -240,12 +296,58 @@ pub fn load(path: &Path) -> anyhow::Result<LoadedConfig> {
         _ => PathBuf::from("."),
     };
 
-    Ok(LoadedConfig {
-        path,
-        root,
-        source,
-        raw,
-    })
+    match (file.project, file.workspace) {
+        (Some(_), Some(workspace)) => Err(Error::Config(semantic(
+            &path,
+            &source,
+            workspace.members.span(),
+            "a configuration cannot define both `[project]` and `[workspace]`",
+        ))
+        .into()),
+        (None, None) => Err(Error::Config(semantic(
+            &path,
+            &source,
+            0..0,
+            "the configuration must define `[project]` or `[workspace]`",
+        ))
+        .into()),
+        (Some(project), None) => Ok(LoadedConfig::Project(LoadedProject {
+            path,
+            root,
+            source,
+            raw: RawProjectConfig {
+                project,
+                recipes: file.recipes,
+                tools: file.tools,
+            },
+        })),
+        (None, Some(workspace)) => {
+            if !file.recipes.is_empty() {
+                return Err(Error::Config(semantic(
+                    &path,
+                    &source,
+                    workspace.members.span(),
+                    "a workspace root cannot define `recipes`",
+                ))
+                .into());
+            }
+            if !file.tools.is_empty() {
+                return Err(Error::Config(semantic(
+                    &path,
+                    &source,
+                    workspace.members.span(),
+                    "a workspace root cannot define `tools`",
+                ))
+                .into());
+            }
+            Ok(LoadedConfig::Workspace(LoadedWorkspace {
+                path,
+                root,
+                source,
+                workspace,
+            }))
+        }
+    }
 }
 
 /// Resolve `path` against the working directory when it is relative.
@@ -257,19 +359,36 @@ fn absolute(path: &Path) -> PathBuf {
     }
 }
 
-impl LoadedConfig {
+impl LoadedProject {
     /// Build a semantic configuration error pointing at `span`.
     ///
     /// Span offsets come from [`Spanned`] values and are resolved against
-    /// [`LoadedConfig::source`] so callers never compute line numbers.
+    /// [`LoadedProject::source`] so callers never compute line numbers.
     pub fn error_at(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
-        let (line, column) = line_column(&self.source, span.start);
-        ConfigError::Semantic {
-            path: self.path.clone(),
-            line,
-            column,
-            reason: reason.into(),
-        }
+        semantic(&self.path, &self.source, span, reason)
+    }
+}
+
+impl LoadedWorkspace {
+    /// Build a semantic configuration error pointing at `span`.
+    pub fn error_at(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
+        semantic(&self.path, &self.source, span, reason)
+    }
+}
+
+/// Resolve `span` in `source` to a positioned [`ConfigError::Semantic`].
+fn semantic(
+    path: &Path,
+    source: &str,
+    span: std::ops::Range<usize>,
+    reason: impl Into<String>,
+) -> ConfigError {
+    let (line, column) = line_column(source, span.start);
+    ConfigError::Semantic {
+        path: path.to_path_buf(),
+        line,
+        column,
+        reason: reason.into(),
     }
 }
 
@@ -288,6 +407,14 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Load `path` and require a project configuration.
+    fn load_project(path: &Path) -> LoadedProject {
+        match load(path).unwrap() {
+            LoadedConfig::Project(project) => project,
+            LoadedConfig::Workspace(_) => panic!("expected a project configuration"),
+        }
+    }
 
     #[test]
     fn discovers_config_in_the_current_directory() {
@@ -349,7 +476,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load(&path).unwrap();
+        let loaded = load_project(&path);
         assert_eq!(loaded.path, path);
         assert_eq!(loaded.root, tmp.path());
         assert_eq!(loaded.raw.project.name.get_ref(), "thesis");
@@ -379,7 +506,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load(&path).unwrap();
+        let loaded = load_project(&path);
         match loaded.raw.tools["pandoc"].get_ref() {
             RawTool::Command(command) => assert_eq!(command, "pandoc"),
             other => panic!("expected shorthand, got {other:?}"),
@@ -410,12 +537,77 @@ mod tests {
     }
 
     #[test]
+    fn loads_a_workspace_root_with_member_spans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(&path, "[workspace]\nmembers = [\"paper\", \"slides\"]\n").unwrap();
+
+        let loaded = match load(&path).unwrap() {
+            LoadedConfig::Workspace(loaded) => loaded,
+            LoadedConfig::Project(_) => panic!("expected a workspace"),
+        };
+        assert_eq!(loaded.path, path);
+        assert_eq!(loaded.root, tmp.path());
+        let members = loaded.workspace.members.get_ref();
+        assert_eq!(members[0].get_ref(), "paper");
+        assert_eq!(&loaded.source[members[1].span()], "\"slides\"");
+    }
+
+    #[test]
+    fn rejects_project_and_workspace_in_one_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(
+            &path,
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+
+        let text = load(&path).unwrap_err().to_string();
+        assert!(
+            text.contains("cannot define both `[project]` and `[workspace]`"),
+            "{text}"
+        );
+        assert!(text.contains(&path.display().to_string()), "{text}");
+    }
+
+    #[test]
+    fn rejects_recipes_in_a_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(
+            &path,
+            "[workspace]\nmembers = []\n[recipes.a]\nsteps = [{ latex = \"xelatex\" }]\n",
+        )
+        .unwrap();
+
+        let text = load(&path).unwrap_err().to_string();
+        assert!(
+            text.contains("a workspace root cannot define `recipes`"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_file_without_project_or_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("texmake.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let text = load(&path).unwrap_err().to_string();
+        assert!(
+            text.contains("must define `[project]` or `[workspace]`"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn error_at_reports_line_and_column() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("texmake.toml");
         std::fs::write(&path, "[project]\nname = \"thesis\"\nmain = \"main.tex\"\n").unwrap();
 
-        let loaded = load(&path).unwrap();
+        let loaded = load_project(&path);
         let error = loaded.error_at(loaded.raw.project.name.span(), "bad name");
         assert_eq!(
             error.to_string(),

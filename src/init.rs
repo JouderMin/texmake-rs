@@ -16,12 +16,14 @@
 
 //! Project scaffolding for `texmake init`.
 //!
-//! `init` is interactive: it asks for the project name, the document type, the
-//! engine, the font and Chinese support, and then writes a project named after
-//! the answer into the current directory. The name is confirmed first because
-//! its answer creates the directory; cancelling any later question removes that
-//! (still empty) directory again. With `dry_run` the questions are still asked
-//! and the planned files are printed instead of written.
+//! `init` is interactive: it asks whether to create a project or a workspace
+//! root, then the project name and, for a project, the document type, the
+//! engine, the font and Chinese support. The files are written into a directory
+//! named after the answer. The name is confirmed before the directory is
+//! created; cancelling any later question removes that (still empty) directory
+//! again. A workspace gets only `texmake.toml` and `.gitignore`; its member
+//! projects are added later by hand. With `dry_run` the questions are still
+//! asked and the planned files are printed instead of written.
 
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
@@ -32,6 +34,29 @@ use anyhow::Context;
 use crate::engine::Engine;
 use crate::error::usage;
 use crate::prompt;
+
+/// What `init` creates: one project, or a workspace root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectType {
+    /// A single document project.
+    Project,
+    /// A workspace root that lists member projects.
+    Workspace,
+}
+
+impl ProjectType {
+    /// The project type choices, in display order.
+    pub const OPTIONS: [ProjectType; 2] = [ProjectType::Project, ProjectType::Workspace];
+}
+
+impl fmt::Display for ProjectType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ProjectType::Project => "项目",
+            ProjectType::Workspace => "工作区",
+        })
+    }
+}
 
 /// Document class of the generated `main.tex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +195,7 @@ fn run_init_in(
     cwd: &Path,
     writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
+    let project_type = prompter.ask_project_type(ProjectType::Project)?;
     let name = prompter.ask_name("")?;
     let name = prompt::validate_name(&name).map_err(usage)?;
     let dir = cwd.join(&name);
@@ -190,7 +216,10 @@ fn run_init_in(
         font: Font::NewComputerModern,
         ctex: false,
     };
-    let outcome = create_project(prompter, opts, &dir, defaults, writer);
+    let outcome = match project_type {
+        ProjectType::Project => create_project(prompter, opts, &dir, defaults, writer),
+        ProjectType::Workspace => create_workspace(opts, &dir, writer),
+    };
     if outcome.is_err() && created {
         // Every failure below leaves the new directory empty, so removing it
         // cannot delete user data.
@@ -226,6 +255,33 @@ fn create_project(
     write_project(dir, &files, opts, writer)
 }
 
+/// Create a workspace root: a `[workspace]` configuration with no members yet,
+/// and the same `.gitignore` a project gets. There is no `main.tex`.
+fn create_workspace(
+    opts: &InitOptions,
+    dir: &Path,
+    writer: &dyn Fn(&Path, &str) -> io::Result<()>,
+) -> anyhow::Result<()> {
+    let files = workspace_files();
+    if opts.dry_run {
+        if !opts.quiet {
+            for (label, _) in &files {
+                println!("would create {label}");
+            }
+        }
+        return Ok(());
+    }
+    write_project(dir, &files, opts, writer)
+}
+
+/// The files a workspace root is made of, in reporting order.
+fn workspace_files() -> [(&'static str, String); 2] {
+    [
+        ("texmake.toml", "[workspace]\nmembers = []\n".to_owned()),
+        (".gitignore", "/build/\n".to_owned()),
+    ]
+}
+
 /// The files `init` creates, in reporting order.
 fn planned_files(answers: &prompt::Answers) -> [(&'static str, String); 3] {
     [
@@ -246,16 +302,16 @@ fn planned_files(answers: &prompt::Answers) -> [(&'static str, String); 3] {
 /// parameter so tests can inject a failing write.
 fn write_project(
     dir: &Path,
-    files: &[(&'static str, String); 3],
+    files: &[(&'static str, String)],
     opts: &InitOptions,
     writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
     // Write the configuration last.
-    let order = [1, 2, 0];
+    let mut order: Vec<&(&'static str, String)> = files.iter().collect();
+    order.sort_by_key(|(label, _)| *label == "texmake.toml");
     let mut created = Vec::new();
     let outcome = (|| -> anyhow::Result<()> {
-        for &index in &order {
-            let (label, content) = &files[index];
+        for (label, content) in &order {
             let path = dir.join(label);
             match writer(&path, content) {
                 Ok(()) => {
@@ -525,7 +581,58 @@ mod tests {
         let error =
             run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect_err("exists");
         assert!(error.to_string().contains("already exists"), "{error}");
-        assert_eq!(prompter.calls, ["name"]);
+        assert_eq!(prompter.calls, ["type", "name"]);
+    }
+
+    #[test]
+    fn a_workspace_gets_a_root_configuration_and_no_document() {
+        let mut prompter =
+            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+        prompter.project_type = ProjectType::Workspace;
+        let dir = tempfile::tempdir().unwrap();
+        run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect("workspace");
+        let workspace = dir.path().join("thesis");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("texmake.toml")).unwrap(),
+            "[workspace]\nmembers = []\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".gitignore")).unwrap(),
+            "/build/\n"
+        );
+        assert!(!workspace.join("main.tex").exists());
+        assert_eq!(prompter.calls, ["type", "name"]);
+    }
+
+    #[test]
+    fn a_workspace_dry_run_writes_nothing() {
+        let mut prompter =
+            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+        prompter.project_type = ProjectType::Workspace;
+        let dir = tempfile::tempdir().unwrap();
+        let opts = InitOptions {
+            dry_run: true,
+            quiet: true,
+        };
+        run_init_in(&mut prompter, &opts, dir.path(), &write_new_file).expect("dry run");
+        assert!(!dir.path().join("thesis").exists());
+    }
+
+    #[test]
+    fn cancelling_the_project_type_creates_nothing() {
+        let mut prompter =
+            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+        prompter.project_type = ProjectType::Workspace;
+        prompter.fail_at = Some("type");
+        let dir = tempfile::tempdir().unwrap();
+        let error =
+            run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect_err("cancel");
+        assert!(matches!(
+            error.downcast_ref::<Error>(),
+            Some(Error::Cancelled)
+        ));
+        assert!(!dir.path().join("thesis").exists());
+        assert_eq!(prompter.calls, ["type"]);
     }
 
     #[test]
@@ -591,6 +698,7 @@ mod tests {
     struct FakePrompter {
         calls: Vec<&'static str>,
         fail_at: Option<&'static str>,
+        project_type: ProjectType,
         doc_type: DocType,
         engine: Engine,
         font: Font,
@@ -602,6 +710,7 @@ mod tests {
             Self {
                 calls: Vec::new(),
                 fail_at: None,
+                project_type: ProjectType::Project,
                 doc_type,
                 engine,
                 font,
@@ -611,6 +720,12 @@ mod tests {
     }
 
     impl prompt::Prompter for FakePrompter {
+        fn ask_project_type(&mut self, _default: ProjectType) -> anyhow::Result<ProjectType> {
+            self.calls.push("type");
+            self.fail_if("type")?;
+            Ok(self.project_type)
+        }
+
         fn ask_name(&mut self, _default: &str) -> anyhow::Result<String> {
             self.calls.push("name");
             Ok("thesis".to_owned())

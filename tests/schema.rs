@@ -27,14 +27,34 @@ fn schema() -> Value {
     serde_json::from_str(&text).expect("the configuration schema must be valid JSON")
 }
 
+/// The `[project]` shape: the first branch of the root `oneOf`.
+fn project_branch(schema: &Value) -> &Value {
+    schema["oneOf"]
+        .as_array()
+        .expect("the root must offer a project or a workspace shape")
+        .iter()
+        .find(|branch| branch["properties"]["project"].is_object())
+        .expect("the root must have a project shape")
+}
+
+/// The `[workspace]` shape: the other branch of the root `oneOf`.
+fn workspace_branch(schema: &Value) -> &Value {
+    schema["oneOf"]
+        .as_array()
+        .expect("the root must offer a project or a workspace shape")
+        .iter()
+        .find(|branch| branch["properties"]["workspace"].is_object())
+        .expect("the root must have a workspace shape")
+}
+
 /// The `steps.items` schema inside a recipe.
-fn step_schema(schema: &Value) -> &Value {
-    &schema["properties"]["recipes"]["additionalProperties"]["properties"]["steps"]["items"]
+fn step_schema(project: &Value) -> &Value {
+    &project["properties"]["recipes"]["additionalProperties"]["properties"]["steps"]["items"]
 }
 
 /// The six action shapes a step may take.
-fn step_actions(schema: &Value) -> &Vec<Value> {
-    step_schema(schema)["oneOf"]
+fn step_actions(project: &Value) -> &Vec<Value> {
+    step_schema(project)["oneOf"]
         .as_array()
         .expect("a step must be expressed as a oneOf array")
 }
@@ -59,24 +79,78 @@ fn schema_declares_draft_2020_12_and_its_identity() {
     );
     assert_eq!(schema["title"], "texmake 配置");
     assert_eq!(schema["type"], "object");
+    assert_eq!(
+        schema["oneOf"].as_array().map(Vec::len),
+        Some(2),
+        "the root must offer exactly a project and a workspace shape"
+    );
+}
+
+#[test]
+fn the_root_is_either_a_project_or_a_workspace() {
+    let schema = schema();
+    let project = project_branch(&schema);
+    assert_eq!(project["type"], "object");
+    assert_eq!(project["additionalProperties"], false);
+    assert!(
+        project["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|key| key == "project")),
+        "the project shape must require `project`"
+    );
+    assert!(
+        project["properties"].get("workspace").is_none(),
+        "the project shape must not accept `workspace`"
+    );
+
+    let workspace = workspace_branch(&schema);
+    assert_eq!(workspace["type"], "object");
+    assert_eq!(workspace["additionalProperties"], false);
+    assert_eq!(workspace["required"], serde_json::json!(["workspace"]));
+    assert!(
+        workspace["properties"].get("recipes").is_none()
+            && workspace["properties"].get("tools").is_none(),
+        "a workspace root must not accept `recipes` or `tools`"
+    );
+    // With `additionalProperties: false` on both shapes, a file that declares
+    // `[project]` and `[workspace]` matches neither branch: the shapes are
+    // mutually exclusive.
+    assert!(
+        project["properties"].get("workspace").is_none()
+            && workspace["properties"].get("project").is_none(),
+        "the two shapes must be mutually exclusive"
+    );
+}
+
+#[test]
+fn workspace_members_are_a_required_array_of_strings() {
+    let schema = schema();
+    let workspace = &workspace_branch(&schema)["properties"]["workspace"];
+    assert_eq!(workspace["type"], "object");
+    assert_eq!(workspace["additionalProperties"], false);
+    assert_eq!(workspace["required"], serde_json::json!(["members"]));
+    let members = &workspace["properties"]["members"];
+    assert_eq!(members["type"], "array");
+    assert_eq!(members["items"]["type"], "string");
 }
 
 #[test]
 fn root_requires_project_and_rejects_unknown_keys() {
     let schema = schema();
-    let required = schema["required"]
+    let branch = project_branch(&schema);
+    let required = branch["required"]
         .as_array()
-        .expect("the root object must list required keys");
+        .expect("the project shape must list required keys");
     assert!(
         required.iter().any(|key| key == "project"),
         "`project` must be required: {required:?}"
     );
     assert_eq!(
-        schema["additionalProperties"], false,
+        branch["additionalProperties"], false,
         "unknown root keys must be rejected"
     );
 
-    let project = &schema["properties"]["project"];
+    let project = &branch["properties"]["project"];
     assert_eq!(project["type"], "object");
     assert_eq!(project["additionalProperties"], false);
     for key in ["name", "main"] {
@@ -91,7 +165,8 @@ fn root_requires_project_and_rejects_unknown_keys() {
 
 #[test]
 fn recipes_require_steps_and_keep_at_least_one_recipe() {
-    let recipes = &schema()["properties"]["recipes"];
+    let schema = schema();
+    let recipes = &project_branch(&schema)["properties"]["recipes"];
     assert_eq!(recipes["type"], "object");
     assert_eq!(recipes["minProperties"], 1);
     let recipe = &recipes["additionalProperties"];
@@ -109,7 +184,9 @@ fn recipes_require_steps_and_keep_at_least_one_recipe() {
     assert_eq!(steps["type"], "array");
     assert_eq!(steps["minItems"], 1);
     assert_eq!(
-        step_schema(&schema())["oneOf"].as_array().map(Vec::len),
+        step_schema(project_branch(&schema))["oneOf"]
+            .as_array()
+            .map(Vec::len),
         Some(6)
     );
 }
@@ -117,7 +194,7 @@ fn recipes_require_steps_and_keep_at_least_one_recipe() {
 #[test]
 fn step_actions_form_a_six_way_one_of() {
     let schema = schema();
-    let branches = step_actions(&schema);
+    let branches = step_actions(project_branch(&schema));
     assert_eq!(branches.len(), 6, "a step must offer exactly six actions");
 
     let actions = ["latex", "biber", "bibtex", "makeindex", "run", "tool"];
@@ -139,7 +216,7 @@ fn step_actions_form_a_six_way_one_of() {
 #[test]
 fn boolean_step_actions_are_required_true() {
     let schema = schema();
-    let branches = step_actions(&schema);
+    let branches = step_actions(project_branch(&schema));
     for action in ["biber", "bibtex", "makeindex"] {
         let branch = action_branch(branches, action);
         assert_eq!(
@@ -166,7 +243,7 @@ fn boolean_step_actions_are_required_true() {
 #[test]
 fn run_step_does_not_accept_args() {
     let schema = schema();
-    let branches = step_actions(&schema);
+    let branches = step_actions(project_branch(&schema));
     let run = action_branch(branches, "run");
     assert!(
         run["properties"].get("args").is_none(),
@@ -181,7 +258,7 @@ fn run_step_does_not_accept_args() {
 #[test]
 fn tools_accept_a_command_string_or_a_table() {
     let schema = schema();
-    let tools = &schema["properties"]["tools"];
+    let tools = &project_branch(&schema)["properties"]["tools"];
     assert_eq!(tools["type"], "object");
     let shapes = tools["additionalProperties"]["oneOf"]
         .as_array()

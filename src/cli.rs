@@ -127,11 +127,7 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
     }
     let loaded = load_project(&cli)?;
     match &cli.command {
-        Some(Command::Check) => {
-            let project = validate::build_plan(&loaded).map_err(Error::from)?;
-            print_check(&project);
-            Ok(())
-        }
+        Some(Command::Check) => check_command(&cli, &loaded),
         Some(Command::Build { name }) => build_command(&cli, &loaded, name.as_deref()),
         Some(Command::Clean) => clean_command(&cli, &loaded),
         // Handled before the configuration is loaded.
@@ -140,23 +136,108 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-/// Validate the project and remove every recipe's output directory.
-fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
-    let project = validate::build_plan(loaded).map_err(Error::from)?;
-    clean::run_clean(&project, cli.dry_run, cli.quiet)
+/// Validate the configuration and report what was checked.
+///
+/// A workspace prints one `==> {member}` heading and one report per member.
+fn check_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
+    match loaded {
+        LoadedConfig::Project(loaded) => {
+            let project = validate::build_plan(loaded).map_err(Error::from)?;
+            print_check(&project);
+            Ok(())
+        }
+        LoadedConfig::Workspace(loaded) => {
+            let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
+            require_members(&workspace)?;
+            for member in &workspace.members {
+                heading(cli, &member.display);
+                print_check(&member.project);
+            }
+            Ok(())
+        }
+    }
 }
 
-/// Validate the project, select the recipe and run the build.
+/// Validate the project(s) and remove every recipe's output directory.
+fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
+    match loaded {
+        LoadedConfig::Project(loaded) => {
+            let project = validate::build_plan(loaded).map_err(Error::from)?;
+            clean::run_clean(&project, cli.dry_run, cli.quiet)
+        }
+        LoadedConfig::Workspace(loaded) => {
+            let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
+            require_members(&workspace)?;
+            for member in &workspace.members {
+                heading(cli, &member.display);
+                clean::run_clean(&member.project, cli.dry_run, cli.quiet)
+                    .map_err(|error| member_context(&member.display, error))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Validate the project(s), select the recipe and run the build(s).
 fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> anyhow::Result<()> {
-    let project = validate::build_plan(loaded).map_err(Error::from)?;
-    let recipe = recipe::select_recipe(&project, name)?;
     let options = BuildOptions {
         force: cli.force,
         dry_run: cli.dry_run,
         verbose: cli.verbose,
         quiet: cli.quiet,
     };
-    build::run_build(&project, recipe, &options)
+    match loaded {
+        LoadedConfig::Project(loaded) => {
+            let project = validate::build_plan(loaded).map_err(Error::from)?;
+            let recipe = recipe::select_recipe(&project, name)?;
+            build::run_build(&project, recipe, &options)
+        }
+        LoadedConfig::Workspace(loaded) => {
+            let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
+            require_members(&workspace)?;
+            for member in &workspace.members {
+                heading(cli, &member.display);
+                let recipe = recipe::select_recipe(&member.project, name)
+                    .map_err(|error| member_context(&member.display, error.into()))?;
+                build::run_build(&member.project, recipe, &options)
+                    .map_err(|error| member_context(&member.display, error))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Print the `==> {member}` heading that separates workspace members.
+fn heading(cli: &Cli, member: &str) {
+    if !cli.quiet {
+        println!("==> {member}");
+    }
+}
+
+/// Reject a workspace that lists no members.
+fn require_members(workspace: &validate::Workspace) -> anyhow::Result<()> {
+    if workspace.members.is_empty() {
+        return Err(crate::error::usage(format!(
+            "workspace `{}` has no members",
+            workspace.root.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Prefix a member failure with `member {name}: ` context.
+///
+/// A domain error is wrapped so [`Error::exit_code`] keeps its exit code; an
+/// I/O or environment error is flattened into a usage-style message.
+fn member_context(member: &str, error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<Error>() {
+        Ok(domain) => Error::Member {
+            member: member.to_owned(),
+            source: Box::new(domain),
+        }
+        .into(),
+        Err(other) => anyhow::anyhow!("member {member}: {other:#}"),
+    }
 }
 
 /// Report what `texmake check` validated.
