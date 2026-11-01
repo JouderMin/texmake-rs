@@ -17,16 +17,15 @@
 //! The LaTeX engines supported by `latex` steps and `texmake init`.
 //!
 //! One definition is the single source of truth for the engine names: the
-//! executable to run, the spelling accepted in `texmake.toml`, the `--engine`
-//! values and the generated configuration all derive from this enum.
+//! executable to run, the spelling accepted in `texmake.toml`, the engine
+//! choices offered by `texmake init` and the generated configuration all derive
+//! from this enum.
 
 use std::fmt;
 use std::str::FromStr;
 
-use clap::ValueEnum;
-
 /// A LaTeX engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     Pdflatex,
     Xelatex,

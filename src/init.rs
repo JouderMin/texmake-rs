@@ -155,18 +155,20 @@ pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
     }
     let cwd = std::env::current_dir().context("cannot read working directory")?;
     let mut prompter = prompt::InquirePrompter;
-    run_init_in(&mut prompter, opts, &cwd)
+    run_init_in(&mut prompter, opts, &cwd, &write_new_file)
 }
 
 /// Ask every question and create the project below `cwd`.
 ///
 /// The project directory is created right after the name is confirmed, so a
-/// cancelled later question removes it again. `prompter` is a parameter so the
-/// flow can be tested without a terminal.
+/// cancelled later question or a failed write removes it again. `prompter` and
+/// `writer` are parameters so the flow can be tested without a terminal or a
+/// failing disk.
 fn run_init_in(
     prompter: &mut dyn prompt::Prompter,
     opts: &InitOptions,
     cwd: &Path,
+    writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
     let name = prompter.ask_name("")?;
     let name = prompt::validate_name(&name).map_err(usage)?;
@@ -188,7 +190,7 @@ fn run_init_in(
         font: Font::NewComputerModern,
         ctex: false,
     };
-    let outcome = create_project(prompter, opts, &dir, defaults);
+    let outcome = create_project(prompter, opts, &dir, defaults, writer);
     if outcome.is_err() && created {
         // Every failure below leaves the new directory empty, so removing it
         // cannot delete user data.
@@ -203,6 +205,7 @@ fn create_project(
     opts: &InitOptions,
     dir: &Path,
     defaults: prompt::Answers,
+    writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
     let answers = prompt::collect(prompter, defaults)?;
     if answers.ctex && !answers.font.supports_chinese() {
@@ -220,7 +223,7 @@ fn create_project(
         }
         return Ok(());
     }
-    write_project(dir, &files, opts, &write_new_file)
+    write_project(dir, &files, opts, writer)
 }
 
 /// The files `init` creates, in reporting order.
@@ -403,17 +406,23 @@ mod tests {
                         let main = main_template(&answers);
                         let class = doc_type.to_string();
                         assert!(main.contains(&format!("\\documentclass{{{class}}}")));
-                        match font.fontsetup_option() {
-                            Some(option) => assert!(
-                                main.contains(&format!("\\usepackage[{option}]{{fontsetup}}")),
-                                "{doc_type:?} {engine} {font} ctex={ctex}: {main}"
-                            ),
-                            None => assert!(
-                                main.contains(font.pdflatex_preamble().unwrap()),
-                                "{doc_type:?} {engine} {font} ctex={ctex}: {main}"
-                            ),
-                        }
+                        let font_line = match font.fontsetup_option() {
+                            Some(option) => format!("\\usepackage[{option}]{{fontsetup}}"),
+                            None => font.pdflatex_preamble().unwrap().to_owned(),
+                        };
+                        assert!(
+                            main.contains(&font_line),
+                            "{doc_type:?} {engine} {font} ctex={ctex}: {main}"
+                        );
                         assert_eq!(main.contains("\\usepackage[UTF8]{ctex}"), ctex);
+                        if ctex {
+                            let font_at = main.find(&font_line).unwrap();
+                            let ctex_at = main.find("\\usepackage[UTF8]{ctex}").unwrap();
+                            assert!(
+                                font_at < ctex_at,
+                                "{doc_type:?} {engine} {font}: the font line must precede ctex: {main}"
+                            );
+                        }
                         match (doc_type, ctex) {
                             (DocType::Article, false) => {
                                 assert!(main.contains("Hello, world."));
@@ -445,7 +454,8 @@ mod tests {
             true,
         );
         let dir = tempfile::tempdir().unwrap();
-        let error = run_init_in(&mut prompter, &quiet(), dir.path()).expect_err("rejected");
+        let error = run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file)
+            .expect_err("rejected");
         let error = error.downcast::<Error>().expect("a usage error");
         assert!(error.to_string().contains("Computer Modern"), "{error}");
         assert!(!dir.path().join("thesis").exists());
@@ -457,7 +467,8 @@ mod tests {
             FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         prompter.fail_at = Some("engine");
         let dir = tempfile::tempdir().unwrap();
-        let error = run_init_in(&mut prompter, &quiet(), dir.path()).expect_err("cancelled");
+        let error = run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file)
+            .expect_err("cancelled");
         assert!(matches!(
             error.downcast_ref::<Error>(),
             Some(Error::Cancelled)
@@ -466,10 +477,30 @@ mod tests {
     }
 
     #[test]
+    fn a_write_failure_removes_the_created_directory() {
+        let mut prompter =
+            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+        let dir = tempfile::tempdir().unwrap();
+        let writer = |path: &Path, content: &str| {
+            if path.ends_with(".gitignore") {
+                return Err(io::Error::other("disk full"));
+            }
+            write_new_file(path, content)
+        };
+        let error =
+            run_init_in(&mut prompter, &quiet(), dir.path(), &writer).expect_err("write fails");
+        assert!(error.to_string().contains(".gitignore"), "{error}");
+        assert!(
+            !dir.path().join("thesis").exists(),
+            "the created project directory must be removed"
+        );
+    }
+
+    #[test]
     fn writes_the_project_described_by_the_answers() {
         let mut prompter = FakePrompter::new(DocType::Book, Engine::Xelatex, Font::Concrete, false);
         let dir = tempfile::tempdir().unwrap();
-        run_init_in(&mut prompter, &quiet(), dir.path()).expect("project");
+        run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect("project");
         let project = dir.path().join("thesis");
         let config = std::fs::read_to_string(project.join("texmake.toml")).unwrap();
         assert!(config.contains("name = \"thesis\""));
@@ -491,7 +522,8 @@ mod tests {
             FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("thesis")).unwrap();
-        let error = run_init_in(&mut prompter, &quiet(), dir.path()).expect_err("exists");
+        let error =
+            run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect_err("exists");
         assert!(error.to_string().contains("already exists"), "{error}");
         assert_eq!(prompter.calls, ["name"]);
     }
@@ -509,7 +541,7 @@ mod tests {
             dry_run: true,
             quiet: false,
         };
-        run_init_in(&mut prompter, &opts, dir.path()).expect("dry run");
+        run_init_in(&mut prompter, &opts, dir.path(), &write_new_file).expect("dry run");
         assert!(!dir.path().join("thesis").exists());
     }
 
