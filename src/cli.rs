@@ -29,9 +29,8 @@ use clap::{Parser, Subcommand};
 use crate::build::{self, BuildOptions};
 use crate::clean;
 use crate::config::{self, LoadedConfig};
-use crate::engine::Engine;
 use crate::error::Error;
-use crate::init::{self, Language};
+use crate::init;
 use crate::recipe;
 use crate::validate::{self, Project};
 
@@ -77,22 +76,7 @@ pub enum Command {
     },
 
     /// Initialize a new document project.
-    Init {
-        /// Target directory; defaults to the current directory.
-        dir: Option<PathBuf>,
-
-        /// Project name; defaults to the target directory name.
-        #[arg(long)]
-        name: Option<String>,
-
-        /// LaTeX engine used by the generated recipe.
-        #[arg(long, value_enum, default_value = "xelatex")]
-        engine: Engine,
-
-        /// Document language of the generated main.tex.
-        #[arg(long, value_enum, default_value = "zh")]
-        language: Language,
-    },
+    Init,
 
     /// Remove every recipe's output directory.
     Clean,
@@ -134,18 +118,8 @@ fn load_project(cli: &Cli) -> anyhow::Result<LoadedConfig> {
 fn execute(cli: Cli) -> anyhow::Result<()> {
     // `init` creates a new project and must not require an existing
     // configuration; every other command loads the project first.
-    if let Some(Command::Init {
-        dir,
-        name,
-        engine,
-        language,
-    }) = &cli.command
-    {
+    if matches!(cli.command, Some(Command::Init)) {
         let options = init::InitOptions {
-            dir: dir.clone().unwrap_or_else(|| PathBuf::from(".")),
-            name: name.clone(),
-            engine: *engine,
-            language: *language,
             dry_run: cli.dry_run,
             quiet: cli.quiet,
         };
@@ -161,7 +135,7 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Build { name }) => build_command(&cli, &loaded, name.as_deref()),
         Some(Command::Clean) => clean_command(&cli, &loaded),
         // Handled before the configuration is loaded.
-        Some(Command::Init { .. }) => unreachable!("init does not load the project"),
+        Some(Command::Init) => unreachable!("init does not load the project"),
         None => build_command(&cli, &loaded, None),
     }
 }

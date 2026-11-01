@@ -17,73 +17,90 @@
 //! Interactive questions asked by `texmake init` in a terminal.
 //!
 //! The real prompts come from [`inquire`]: a text prompt for the project name
-//! and a select prompt for the language and the engine. [`collect`] keeps the
-//! order (project name, language, engine) and the defaults testable without a
-//! terminal. Cancelling a question (Esc, Ctrl-C or end of input) is reported as
-//! [`Error::Cancelled`], so `init` prints `已取消` and exits with code 130
-//! before writing anything.
+//! and select prompts for the document type, the engine, the font and Chinese
+//! support. [`collect`] keeps the question order and the defaults testable
+//! without a terminal. Cancelling a question (Esc, Ctrl-C or end of input) is
+//! reported as [`Error::Cancelled`], so `init` prints `已取消` and exits with
+//! code 130 before writing anything.
 
-use anyhow::anyhow;
 use inquire::validator::Validation;
 use inquire::{CustomUserError, InquireError, Select, Text};
 
 use crate::engine::Engine;
 use crate::error::Error;
-use crate::init::Language;
+use crate::init::{DocType, Font, font_options};
 
-/// Labels of the three questions.
+/// Labels of the questions.
 const NAME_PROMPT: &str = "项目名";
-const LANGUAGE_PROMPT: &str = "语言";
+const DOC_TYPE_PROMPT: &str = "文档类型";
 const ENGINE_PROMPT: &str = "引擎";
+const FONT_PROMPT: &str = "字体";
+const CTEX_PROMPT: &str = "中文支持";
 
-/// Display labels of the language choices, in the order shown by the prompt.
-const LANGUAGE_ZH: &str = "zh 中文";
-const LANGUAGE_EN: &str = "en English";
+/// Display labels of the Chinese support choices.
+const CTEX_YES: &str = "是";
+const CTEX_NO: &str = "否";
 
-/// Display labels of the engine choices, in the order shown by the prompt.
-const ENGINE_XELATEX: &str = "xelatex";
-const ENGINE_LUALATEX: &str = "lualatex";
-
-/// The language choices, in display order.
-fn language_options() -> [&'static str; 2] {
-    [LANGUAGE_ZH, LANGUAGE_EN]
+/// The Chinese support choices, in display order.
+fn ctex_options() -> [&'static str; 2] {
+    [CTEX_YES, CTEX_NO]
 }
 
 /// The engine choices, in display order.
-fn engine_options() -> [&'static str; 2] {
-    [ENGINE_XELATEX, ENGINE_LUALATEX]
+fn engine_choices() -> Vec<Engine> {
+    vec![Engine::Pdflatex, Engine::Xelatex, Engine::Lualatex]
 }
 
-/// The starting cursor of the language prompt for `default`.
-fn language_cursor(default: Language) -> usize {
+/// The starting cursor of the document type prompt for `default`.
+fn doc_type_cursor(default: DocType) -> usize {
     match default {
-        Language::Zh => 0,
-        Language::En => 1,
+        DocType::Article => 0,
+        DocType::Book => 1,
     }
 }
 
 /// The starting cursor of the engine prompt for `default`.
-///
-/// `pdflatex` cannot reach the prompt (`init` rejects it first); it maps to the
-/// first supported choice instead of panicking.
 fn engine_cursor(default: Engine) -> usize {
-    usize::from(default == Engine::Lualatex)
+    match default {
+        Engine::Pdflatex => 0,
+        Engine::Xelatex => 1,
+        Engine::Lualatex => 2,
+    }
+}
+
+/// The starting cursor of the font prompt for `default`.
+///
+/// A font that is not offered for `engine` falls back to the first choice.
+fn font_cursor(engine: Engine, default: Font) -> usize {
+    font_options(engine)
+        .iter()
+        .position(|font| *font == default)
+        .unwrap_or(0)
+}
+
+/// The starting cursor of the Chinese support prompt for `default`.
+fn ctex_cursor(default: bool) -> usize {
+    usize::from(!default)
 }
 
 /// The answers collected by `init` in a terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answers {
     pub name: String,
-    pub language: Language,
+    pub doc_type: DocType,
     pub engine: Engine,
+    pub font: Font,
+    pub ctex: bool,
 }
 
 /// Asks the questions of `init`; implemented by [`InquirePrompter`] in
 /// production and by a fake in the tests.
 pub trait Prompter {
     fn ask_name(&mut self, default: &str) -> anyhow::Result<String>;
-    fn ask_language(&mut self, default: Language) -> anyhow::Result<Language>;
+    fn ask_doc_type(&mut self, default: DocType) -> anyhow::Result<DocType>;
     fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine>;
+    fn ask_font(&mut self, engine: Engine, default: Font) -> anyhow::Result<Font>;
+    fn ask_ctex(&mut self, default: bool) -> anyhow::Result<bool>;
 }
 
 /// Asks the questions with [`inquire`] prompts on the terminal.
@@ -96,58 +113,83 @@ impl Prompter for InquirePrompter {
         // pre-fill the field and make typed text append to it.
         Text::new(NAME_PROMPT)
             .with_default(default)
-            .with_validator(validate_name)
+            .with_validator(name_validator)
             .prompt()
             .map(|name| name.trim().to_owned())
             .map_err(cancelled)
     }
 
-    fn ask_language(&mut self, default: Language) -> anyhow::Result<Language> {
-        let choice = Select::new(LANGUAGE_PROMPT, language_options().to_vec())
-            .with_starting_cursor(language_cursor(default))
+    fn ask_doc_type(&mut self, default: DocType) -> anyhow::Result<DocType> {
+        Select::new(DOC_TYPE_PROMPT, DocType::OPTIONS.to_vec())
+            .with_starting_cursor(doc_type_cursor(default))
             .prompt()
-            .map_err(cancelled)?;
-        Ok(if choice == LANGUAGE_ZH {
-            Language::Zh
-        } else {
-            Language::En
-        })
+            .map_err(cancelled)
     }
 
     fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine> {
-        let choice = Select::new(ENGINE_PROMPT, engine_options().to_vec())
+        Select::new(ENGINE_PROMPT, engine_choices())
             .with_starting_cursor(engine_cursor(default))
             .prompt()
+            .map_err(cancelled)
+    }
+
+    fn ask_font(&mut self, engine: Engine, default: Font) -> anyhow::Result<Font> {
+        Select::new(FONT_PROMPT, font_options(engine).to_vec())
+            .with_starting_cursor(font_cursor(engine, default))
+            .prompt()
+            .map_err(cancelled)
+    }
+
+    fn ask_ctex(&mut self, default: bool) -> anyhow::Result<bool> {
+        let choice = Select::new(CTEX_PROMPT, ctex_options().to_vec())
+            .with_starting_cursor(ctex_cursor(default))
+            .prompt()
             .map_err(cancelled)?;
-        Ok(if choice == ENGINE_LUALATEX {
-            Engine::Lualatex
-        } else {
-            Engine::Xelatex
-        })
+        Ok(choice == CTEX_YES)
     }
 }
 
-/// Ask the project name, then the language, then the engine.
+/// Ask the document type, the engine, the font and Chinese support, in that
+/// order; the project name is already confirmed and lives in `defaults`.
 ///
-/// `defaults` holds the command-line values (or the directory name); the
-/// prompts start with them. A cancelled question aborts the whole sequence.
+/// A cancelled question aborts the whole sequence.
 pub fn collect(prompter: &mut dyn Prompter, defaults: Answers) -> anyhow::Result<Answers> {
-    let name = prompter.ask_name(&defaults.name)?;
-    let language = prompter.ask_language(defaults.language)?;
+    let doc_type = prompter.ask_doc_type(defaults.doc_type)?;
     let engine = prompter.ask_engine(defaults.engine)?;
+    let font = prompter.ask_font(engine, defaults.font)?;
+    let ctex = prompter.ask_ctex(defaults.ctex)?;
     Ok(Answers {
-        name,
-        language,
+        name: defaults.name,
+        doc_type,
         engine,
+        font,
+        ctex,
     })
 }
 
-/// Reject a project name that is empty or only whitespace.
-fn validate_name(value: &str) -> Result<Validation, CustomUserError> {
-    if value.trim().is_empty() {
-        return Err("项目名不能为空".into());
+/// Check a project name and return it without surrounding whitespace.
+///
+/// The name becomes a directory name, so `.`, `..` and path separators are
+/// rejected as well as empty names.
+pub fn validate_name(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("项目名不能为空".to_owned());
     }
-    Ok(Validation::Valid)
+    if trimmed == "." || trimmed == ".." {
+        return Err("项目名不能是 `.` 或 `..`".to_owned());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("项目名不能包含路径分隔符".to_owned());
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// The [`inquire`] validator around [`validate_name`].
+fn name_validator(value: &str) -> Result<Validation, CustomUserError> {
+    validate_name(value)
+        .map(|_| Validation::Valid)
+        .map_err(Into::into)
 }
 
 /// Map a cancelled or failed prompt to an error the caller can exit on.
@@ -164,7 +206,7 @@ fn cancelled(error: InquireError) -> anyhow::Error {
         InquireError::IO(ref io) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
             Error::Cancelled.into()
         }
-        other => anyhow!("cannot ask the init questions: {other}"),
+        other => anyhow::anyhow!("cannot ask the init questions: {other}"),
     }
 }
 
@@ -176,112 +218,200 @@ mod tests {
     #[derive(Debug)]
     struct FakePrompter {
         calls: Vec<&'static str>,
-        name_default: Option<String>,
-        language_default: Option<Language>,
+        doc_type_default: Option<DocType>,
         engine_default: Option<Engine>,
+        font_engine: Option<Engine>,
+        font_default: Option<Font>,
+        ctex_default: Option<bool>,
         fail_at: Option<&'static str>,
-        name: String,
-        language: Language,
+        doc_type: DocType,
         engine: Engine,
+        font: Font,
+        ctex: bool,
     }
 
     impl FakePrompter {
         fn new() -> Self {
             Self {
                 calls: Vec::new(),
-                name_default: None,
-                language_default: None,
+                doc_type_default: None,
                 engine_default: None,
+                font_engine: None,
+                font_default: None,
+                ctex_default: None,
                 fail_at: None,
-                name: "thesis".to_owned(),
-                language: Language::En,
-                engine: Engine::Lualatex,
+                doc_type: DocType::Book,
+                engine: Engine::Pdflatex,
+                font: Font::LatinModern,
+                ctex: false,
             }
         }
     }
 
     impl Prompter for FakePrompter {
-        fn ask_name(&mut self, default: &str) -> anyhow::Result<String> {
+        fn ask_name(&mut self, _default: &str) -> anyhow::Result<String> {
             self.calls.push("name");
-            self.name_default = Some(default.to_owned());
-            if self.fail_at == Some("name") {
-                return Err(usage("init cancelled: test".to_owned()));
-            }
-            Ok(self.name.clone())
+            Ok("thesis".to_owned())
         }
 
-        fn ask_language(&mut self, default: Language) -> anyhow::Result<Language> {
-            self.calls.push("language");
-            self.language_default = Some(default);
-            if self.fail_at == Some("language") {
-                return Err(usage("init cancelled: test".to_owned()));
+        fn ask_doc_type(&mut self, default: DocType) -> anyhow::Result<DocType> {
+            self.calls.push("doc_type");
+            self.doc_type_default = Some(default);
+            if self.fail_at == Some("doc_type") {
+                return Err(usage("cancelled".to_owned()));
             }
-            Ok(self.language)
+            Ok(self.doc_type)
         }
 
         fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine> {
             self.calls.push("engine");
             self.engine_default = Some(default);
             if self.fail_at == Some("engine") {
-                return Err(usage("init cancelled: test".to_owned()));
+                return Err(usage("cancelled".to_owned()));
             }
             Ok(self.engine)
+        }
+
+        fn ask_font(&mut self, engine: Engine, default: Font) -> anyhow::Result<Font> {
+            self.calls.push("font");
+            self.font_engine = Some(engine);
+            self.font_default = Some(default);
+            if self.fail_at == Some("font") {
+                return Err(usage("cancelled".to_owned()));
+            }
+            Ok(self.font)
+        }
+
+        fn ask_ctex(&mut self, default: bool) -> anyhow::Result<bool> {
+            self.calls.push("ctex");
+            self.ctex_default = Some(default);
+            if self.fail_at == Some("ctex") {
+                return Err(usage("cancelled".to_owned()));
+            }
+            Ok(self.ctex)
         }
     }
 
     fn defaults() -> Answers {
         Answers {
             name: "demo".to_owned(),
-            language: Language::Zh,
+            doc_type: DocType::Article,
             engine: Engine::Xelatex,
+            font: Font::NewComputerModern,
+            ctex: true,
         }
     }
 
     #[test]
-    fn collect_asks_the_name_then_the_language_then_the_engine() {
+    fn collect_asks_the_document_type_then_engine_then_font_then_ctex() {
         let mut prompter = FakePrompter::new();
         let answers = collect(&mut prompter, defaults()).expect("answers");
-        assert_eq!(prompter.calls, ["name", "language", "engine"]);
-        assert_eq!(answers.name, "thesis");
-        assert_eq!(answers.language, Language::En);
-        assert_eq!(answers.engine, Engine::Lualatex);
+        assert_eq!(prompter.calls, ["doc_type", "engine", "font", "ctex"]);
+        assert_eq!(answers.name, "demo");
+        assert_eq!(answers.doc_type, DocType::Book);
+        assert_eq!(answers.engine, Engine::Pdflatex);
+        assert_eq!(answers.font, Font::LatinModern);
+        assert!(!answers.ctex);
     }
 
     #[test]
     fn collect_passes_the_defaults_to_each_question() {
         let mut prompter = FakePrompter::new();
         collect(&mut prompter, defaults()).expect("answers");
-        assert_eq!(prompter.name_default.as_deref(), Some("demo"));
-        assert_eq!(prompter.language_default, Some(Language::Zh));
+        assert_eq!(prompter.doc_type_default, Some(DocType::Article));
         assert_eq!(prompter.engine_default, Some(Engine::Xelatex));
+        // The font prompt follows the chosen engine, not the default one.
+        assert_eq!(prompter.font_engine, Some(Engine::Pdflatex));
+        assert_eq!(prompter.font_default, Some(Font::NewComputerModern));
+        assert_eq!(prompter.ctex_default, Some(true));
     }
 
     #[test]
-    fn collect_reports_a_cancelled_question_as_a_usage_error() {
+    fn collect_stops_after_a_cancelled_document_type() {
         let mut prompter = FakePrompter::new();
-        prompter.fail_at = Some("engine");
+        prompter.fail_at = Some("doc_type");
         let error = collect(&mut prompter, defaults()).expect_err("cancelled");
-        let error = error
-            .downcast_ref::<Error>()
-            .expect("the cancellation is a texmake error");
-        assert!(matches!(&error, Error::Usage(message) if message.contains("cancelled")));
+        assert_eq!(prompter.calls, ["doc_type"]);
+        assert!(error.downcast_ref::<Error>().is_some());
     }
 
     #[test]
-    fn the_name_validator_accepts_a_normal_name() {
-        assert!(matches!(validate_name("thesis"), Ok(Validation::Valid)));
-        assert!(matches!(validate_name("  thesis  "), Ok(Validation::Valid)));
+    fn collect_stops_after_a_cancelled_font() {
+        let mut prompter = FakePrompter::new();
+        prompter.fail_at = Some("font");
+        collect(&mut prompter, defaults()).expect_err("cancelled");
+        assert_eq!(prompter.calls, ["doc_type", "engine", "font"]);
     }
 
     #[test]
-    fn the_name_validator_rejects_blank_names_with_a_message() {
+    fn validate_name_accepts_a_normal_name_and_trims_it() {
+        assert_eq!(validate_name("thesis").as_deref(), Ok("thesis"));
+        assert_eq!(validate_name("  thesis  ").as_deref(), Ok("thesis"));
+    }
+
+    #[test]
+    fn validate_name_rejects_blank_names() {
         for blank in ["", "   ", "\t\n"] {
-            let error = match validate_name(blank) {
-                Err(error) => error,
-                Ok(_) => panic!("`{blank:?}` must be rejected"),
-            };
-            assert_eq!(error.to_string(), "项目名不能为空");
+            assert_eq!(validate_name(blank), Err("项目名不能为空".to_owned()));
         }
+    }
+
+    #[test]
+    fn validate_name_rejects_dot_and_dot_dot() {
+        for name in [".", "..", " . "] {
+            assert_eq!(
+                validate_name(name),
+                Err("项目名不能是 `.` 或 `..`".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_path_separators() {
+        for name in ["a/b", "a\\b", "/tmp/x"] {
+            assert_eq!(
+                validate_name(name),
+                Err("项目名不能包含路径分隔符".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn the_document_type_choices_are_article_then_book() {
+        assert_eq!(
+            DocType::OPTIONS.map(|doc_type| doc_type.to_string()),
+            ["article", "book"]
+        );
+        assert_eq!(doc_type_cursor(DocType::Article), 0);
+        assert_eq!(doc_type_cursor(DocType::Book), 1);
+    }
+
+    #[test]
+    fn the_engine_choices_are_pdflatex_xelatex_lualatex() {
+        assert_eq!(
+            engine_choices()
+                .iter()
+                .map(Engine::to_string)
+                .collect::<Vec<_>>(),
+            ["pdflatex", "xelatex", "lualatex"]
+        );
+        assert_eq!(engine_cursor(Engine::Pdflatex), 0);
+        assert_eq!(engine_cursor(Engine::Xelatex), 1);
+        assert_eq!(engine_cursor(Engine::Lualatex), 2);
+    }
+
+    #[test]
+    fn the_ctex_choices_are_yes_then_no() {
+        assert_eq!(ctex_options(), ["是", "否"]);
+        assert_eq!(ctex_cursor(true), 0);
+        assert_eq!(ctex_cursor(false), 1);
+    }
+
+    #[test]
+    fn the_font_cursor_falls_back_to_the_first_choice() {
+        assert_eq!(font_cursor(Engine::Pdflatex, Font::LatinModern), 1);
+        assert_eq!(font_cursor(Engine::Xelatex, Font::NewComputerModern), 0);
+        assert_eq!(font_cursor(Engine::Pdflatex, Font::Fira), 0);
     }
 
     fn texmake_error(error: anyhow::Error) -> Error {
@@ -316,49 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn collect_stops_after_a_cancelled_name() {
-        let mut prompter = FakePrompter::new();
-        prompter.fail_at = Some("name");
-        let error = collect(&mut prompter, defaults()).expect_err("cancelled");
-        assert_eq!(prompter.calls, ["name"]);
-        assert!(
-            matches!(texmake_error(error), Error::Usage(message) if message.contains("cancelled"))
-        );
-    }
-
-    #[test]
-    fn collect_stops_after_a_cancelled_language() {
-        let mut prompter = FakePrompter::new();
-        prompter.fail_at = Some("language");
-        let error = collect(&mut prompter, defaults()).expect_err("cancelled");
-        assert_eq!(prompter.calls, ["name", "language"]);
-        assert!(
-            matches!(texmake_error(error), Error::Usage(message) if message.contains("cancelled"))
-        );
-    }
-
-    #[test]
-    fn the_language_choices_are_zh_then_en() {
-        assert_eq!(language_options(), ["zh 中文", "en English"]);
-    }
-
-    #[test]
-    fn the_engine_choices_are_xelatex_then_lualatex() {
-        assert_eq!(engine_options(), ["xelatex", "lualatex"]);
-    }
-
-    #[test]
-    fn the_starting_cursors_point_at_the_defaults() {
-        assert_eq!(language_cursor(Language::Zh), 0);
-        assert_eq!(language_cursor(Language::En), 1);
-        assert_eq!(engine_cursor(Engine::Xelatex), 0);
-        assert_eq!(engine_cursor(Engine::Lualatex), 1);
-    }
-
-    #[test]
     fn the_prompt_labels_name_the_questions() {
         assert_eq!(NAME_PROMPT, "项目名");
-        assert_eq!(LANGUAGE_PROMPT, "语言");
+        assert_eq!(DOC_TYPE_PROMPT, "文档类型");
         assert_eq!(ENGINE_PROMPT, "引擎");
+        assert_eq!(FONT_PROMPT, "字体");
+        assert_eq!(CTEX_PROMPT, "中文支持");
     }
 }

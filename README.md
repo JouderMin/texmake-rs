@@ -15,22 +15,28 @@ cargo build --release
 ## 快速开始
 
 ```sh
-texmake init thesis   # 创建 texmake.toml、main.tex 和 .gitignore
-cd thesis
+texmake init          # 交互式创建项目目录（texmake.toml、main.tex 和 .gitignore）
+cd <项目名>
 texmake               # 按默认配方构建，输出 build/main.pdf
 texmake check         # 检查配置
 texmake clean         # 删除所有配方的输出目录
 ```
 
-`texmake init [dir]` 创建项目，支持以下选项：
+`texmake init` 不带参数，只能在终端中运行。命令依次询问：
 
-- `--name <name>`：项目名。未指定时取目标目录名。非终端运行时，目标目录没有目录名（例如 `/`）会报错，并要求用 `--name` 指定；终端交互时改为要求输入项目名。
-- `--engine <pdflatex|xelatex|lualatex>`：生成配方使用的引擎，默认 `xelatex`。模板使用 ctex 与 fontsetup，仅支持 `xelatex` 或 `lualatex`；`pdflatex` 会被拒绝。
-- `--language <zh|en>`：生成的 `main.tex` 使用的语言，默认 `zh`。
+1. 项目名：文本输入。不能为空或只有空白，也不能是 `.`、`..` 或包含 `/`、`\`。确认后立即在当前目录创建同名目录；目录已存在时报错，退出码 2，不再询问后续问题。
+2. 文档类型：`article` 或 `book`。
+3. 引擎：`pdflatex`、`xelatex` 或 `lualatex`。
+4. 字体：随引擎变化。`pdflatex` 提供 `Computer Modern` 与 `Latin Modern`；`xelatex` 与 `lualatex` 提供 `New Computer Modern`、`New Computer Modern Sans`、`Concrete`、`Euler`、`Fira` 与 `STIX Two`。
+5. 中文支持：`是` 或 `否`。选 `是` 时在导言区末尾加入 `\usepackage[UTF8]{ctex}`。
 
-init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，其中 `.gitignore` 的内容为 `/build/`。中文模板使用 article 文档类与 ctex 宏包，中英文模板都加载 fontsetup 默认选项，需要用 xelatex 或 lualatex 编译。已有 `texmake.toml` 时，init 报错，不覆盖文件。其他已有文件保留，并显示为跳过；同名路径已存在但不是普通文件（例如目录）时报错，且不写任何文件。`--engine pdflatex` 报错：模板使用 ctex 与 fontsetup，需要 xelatex 或 lualatex。`-n` 只显示将创建或跳过的文件；`-q` 不显示进度信息。
+选择 `Computer Modern` 且启用中文支持时报错，退出码 2：该字体不支持中文。请改用 `Latin Modern`，或改用 `xelatex`/`lualatex` 并选择 Unicode 字体。报错与取消时删除本次创建的空目录。
 
-在终端中运行时，init 依次询问项目名、语言和引擎。项目名用文本输入，初值为 `--name` 或目标目录名，不能为空或只有空白。语言用选择列表，选项为 `zh 中文` 与 `en English`；引擎也为选择列表，选项为 `xelatex` 与 `lualatex`。选择列表的光标起始于命令选项或默认值对应的项，直接回车接受。按 Esc 或 Ctrl-C 取消，标准输入结束（EOF）也取消；取消时 init 不写任何文件，只在标准错误输出 `已取消`，退出码为 130。标准输入不是终端时（例如管道或 CI），init 不询问，直接使用选项或默认值；`-n` 也跳过询问。`-q` 不隐藏提问。
+init 生成 `texmake.toml`、`main.tex` 和 `.gitignore`，`.gitignore` 的内容为 `/build/`。`article` 使用 `\documentclass{article}`；`book` 使用 `\documentclass{book}`，正文以 `\chapter` 开头。字体行位于导言区，`ctex` 行位于其后。
+
+按 Esc 或 Ctrl-C 取消，标准输入结束（EOF）也取消。取消时只输出 `已取消`，退出码 130，不写文件。标准输入不是终端时（例如管道或 CI），init 直接报错，退出码 2，不写文件。
+
+`-n` 照常提问，只打印将创建的文件，不写文件。`-q` 不显示进度信息，不隐藏提问。
 
 ## 配置
 
@@ -73,7 +79,7 @@ steps = [{ latex = "xelatex", args = ["-draftmode"] }]
 |---|---|
 | `texmake` | 构建默认配方。 |
 | `texmake build [name]` | 构建默认配方或指定配方。 |
-| `texmake init [dir]` | 创建新项目。 |
+| `texmake init` | 交互式创建新项目。 |
 | `texmake clean` | 删除所有配方的输出目录。 |
 | `texmake check` | 检查配置，打印项目名和配方列表。 |
 
@@ -213,6 +219,7 @@ pandoc = "pandoc"
 - 没有 watch 模式，配方之间不能共享公共步骤。
 - 主 PDF 的文件名是主文档名去掉扩展名后加 `.pdf`。
 - 支持 macOS 和 Linux；Windows 为尽力支持。
+- init 仅支持交互式终端，不支持管道或 CI。
 
 ## 许可证
 

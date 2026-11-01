@@ -16,208 +16,253 @@
 
 //! Project scaffolding for `texmake init`.
 //!
-//! `init` is the only command that writes into the project root: it creates a
-//! minimal `texmake.toml`, a compilable `main.tex` and a `.gitignore`. Existing
-//! files are never overwritten; an existing configuration aborts the operation
-//! before anything is written. The document files are written before the
-//! configuration, and a write failure removes the files created by that run, so
-//! a failed run does not leave a configuration (or other new files) behind.
-//! With `dry_run` nothing is created and the planned actions are printed
-//! instead; `quiet` suppresses all progress lines.
+//! `init` is interactive: it asks for the project name, the document type, the
+//! engine, the font and Chinese support, and then writes a project named after
+//! the answer into the current directory. The name is confirmed first because
+//! its answer creates the directory; cancelling any later question removes that
+//! (still empty) directory again. With `dry_run` the questions are still asked
+//! and the planned files are printed instead of written.
 
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context;
-use clap::ValueEnum;
 
 use crate::engine::Engine;
-use crate::error::{Error, usage};
+use crate::error::usage;
 use crate::prompt;
 
-/// Document language of the generated `main.tex`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Language {
-    Zh,
-    En,
+/// Document class of the generated `main.tex`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocType {
+    Article,
+    Book,
 }
 
-impl fmt::Display for Language {
+impl DocType {
+    /// The document type choices, in display order.
+    pub const OPTIONS: [DocType; 2] = [DocType::Article, DocType::Book];
+}
+
+impl fmt::Display for DocType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Language::Zh => "zh",
-            Language::En => "en",
+            DocType::Article => "article",
+            DocType::Book => "book",
         })
     }
 }
 
-/// Everything `texmake init` needs, already parsed from the command line.
+/// Font choice of the generated `main.tex`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Font {
+    ComputerModern,
+    LatinModern,
+    NewComputerModern,
+    NewComputerModernSans,
+    Concrete,
+    Euler,
+    Fira,
+    StixTwo,
+}
+
+impl Font {
+    /// Display label shown by the font prompt.
+    fn label(self) -> &'static str {
+        match self {
+            Font::ComputerModern => "Computer Modern",
+            Font::LatinModern => "Latin Modern",
+            Font::NewComputerModern => "New Computer Modern",
+            Font::NewComputerModernSans => "New Computer Modern Sans",
+            Font::Concrete => "Concrete",
+            Font::Euler => "Euler",
+            Font::Fira => "Fira",
+            Font::StixTwo => "STIX Two",
+        }
+    }
+
+    /// The `fontsetup` option for a Unicode engine, or `None` for `pdflatex`
+    /// fonts.
+    fn fontsetup_option(self) -> Option<&'static str> {
+        match self {
+            Font::ComputerModern | Font::LatinModern => None,
+            Font::NewComputerModern => Some("default"),
+            Font::NewComputerModernSans => Some("sansdefault"),
+            Font::Concrete => Some("concrete"),
+            Font::Euler => Some("euler"),
+            Font::Fira => Some("fira"),
+            Font::StixTwo => Some("stixtwo"),
+        }
+    }
+
+    /// The preamble line for a `pdflatex` font.
+    fn pdflatex_preamble(self) -> Option<&'static str> {
+        match self {
+            Font::ComputerModern => Some("\\usepackage[T1]{fontenc}"),
+            Font::LatinModern => Some("\\usepackage{lmodern}"),
+            _ => None,
+        }
+    }
+
+    /// Whether `ctex` can be combined with this font.
+    fn supports_chinese(self) -> bool {
+        self != Font::ComputerModern
+    }
+}
+
+impl fmt::Display for Font {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// The font choices offered for `engine`, in display order.
+pub fn font_options(engine: Engine) -> &'static [Font] {
+    const PDFLATEX: [Font; 2] = [Font::ComputerModern, Font::LatinModern];
+    const UNICODE: [Font; 6] = [
+        Font::NewComputerModern,
+        Font::NewComputerModernSans,
+        Font::Concrete,
+        Font::Euler,
+        Font::Fira,
+        Font::StixTwo,
+    ];
+    match engine {
+        Engine::Pdflatex => &PDFLATEX,
+        Engine::Xelatex | Engine::Lualatex => &UNICODE,
+    }
+}
+
+/// Everything `texmake init` needs from the command line.
 #[derive(Debug)]
 pub struct InitOptions {
-    /// Target directory; `.` means the current directory.
-    pub dir: PathBuf,
-    /// Project name; defaults to the target directory's name.
-    pub name: Option<String>,
-    /// LaTeX engine used by the generated recipe.
-    pub engine: Engine,
-    /// Document language of the generated `main.tex`.
-    pub language: Language,
-    /// Only report what would be created; write nothing.
+    /// Ask the questions but only report what would be created.
     pub dry_run: bool,
-    /// Suppress progress lines (`created`, `skipped`, `would ...`).
+    /// Suppress progress lines (`created`, `would ...`).
     pub quiet: bool,
 }
 
-/// Create a new document project in `opts.dir`.
+/// Create a new document project in the current directory.
 ///
-/// The target directory is created if needed. `texmake.toml` is never
-/// overwritten: if it already exists the command fails before writing anything.
-/// Other files that already exist are kept and reported as skipped. With
-/// `dry_run` no directory or file is created; the planned actions are printed
-/// instead. `quiet` suppresses the progress lines.
+/// `init` needs a terminal: without one the questions cannot be asked, so the
+/// command fails before touching the file system.
 pub fn run_init(opts: &InitOptions) -> anyhow::Result<()> {
-    let dir = target_dir(&opts.dir)?;
+    if !std::io::stdin().is_terminal() {
+        return Err(usage(
+            "init needs a terminal: run it in an interactive shell".to_owned(),
+        ));
+    }
+    let cwd = std::env::current_dir().context("cannot read working directory")?;
+    let mut prompter = prompt::InquirePrompter;
+    run_init_in(&mut prompter, opts, &cwd)
+}
 
-    // A terminal session always asks; the command-line values become the
-    // defaults. Pipes and `--dry-run` never block on a question. The engine is
-    // checked first so an unsupported `--engine` is refused before asking.
-    let interactive = !opts.dry_run && std::io::stdin().is_terminal();
-    ensure_supported_engine(opts.engine)?;
-    let answers = if interactive {
-        ask_options(&dir, opts)?
-    } else {
-        prompt::Answers {
-            name: project_name(&dir, opts.name.as_deref())?,
-            language: opts.language,
-            engine: opts.engine,
+/// Ask every question and create the project below `cwd`.
+///
+/// The project directory is created right after the name is confirmed, so a
+/// cancelled later question removes it again. `prompter` is a parameter so the
+/// flow can be tested without a terminal.
+fn run_init_in(
+    prompter: &mut dyn prompt::Prompter,
+    opts: &InitOptions,
+    cwd: &Path,
+) -> anyhow::Result<()> {
+    let name = prompter.ask_name("")?;
+    let name = prompt::validate_name(&name).map_err(usage)?;
+    let dir = cwd.join(&name);
+
+    let mut created = false;
+    if !opts.dry_run {
+        if dir.exists() {
+            return Err(usage(format!("`{}` already exists", dir.display())));
         }
+        std::fs::create_dir(&dir).with_context(|| format!("cannot create `{}`", dir.display()))?;
+        created = true;
+    }
+
+    let defaults = prompt::Answers {
+        name,
+        doc_type: DocType::Article,
+        engine: Engine::Xelatex,
+        font: Font::NewComputerModern,
+        ctex: false,
     };
+    let outcome = create_project(prompter, opts, &dir, defaults);
+    if outcome.is_err() && created {
+        // Every failure below leaves the new directory empty, so removing it
+        // cannot delete user data.
+        let _ = std::fs::remove_dir(&dir);
+    }
+    outcome
+}
 
-    let config_path = dir.join("texmake.toml");
-    let main_path = dir.join("main.tex");
-    let gitignore_path = dir.join(".gitignore");
-    precheck_targets(&config_path, &main_path, &gitignore_path)?;
-
+/// Ask for the document layout and write the files.
+fn create_project(
+    prompter: &mut dyn prompt::Prompter,
+    opts: &InitOptions,
+    dir: &Path,
+    defaults: prompt::Answers,
+) -> anyhow::Result<()> {
+    let answers = prompt::collect(prompter, defaults)?;
+    if answers.ctex && !answers.font.supports_chinese() {
+        return Err(usage(
+            "Computer Modern does not support Chinese: choose Latin Modern, or use xelatex or lualatex with a Unicode font"
+                .to_owned(),
+        ));
+    }
+    let files = planned_files(&answers);
     if opts.dry_run {
-        for (path, label) in [
-            (&config_path, "texmake.toml"),
-            (&main_path, "main.tex"),
-            (&gitignore_path, ".gitignore"),
-        ] {
-            if opts.quiet {
-                continue;
-            }
-            if path.exists() {
-                println!("would skip existing {label}");
-            } else {
+        if !opts.quiet {
+            for (label, _) in &files {
                 println!("would create {label}");
             }
         }
         return Ok(());
     }
-
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create `{}`", dir.display()))?;
-
-    write_project(
-        &dir,
-        &answers.name,
-        answers.engine,
-        answers.language,
-        opts,
-        &write_new_file,
-    )
+    write_project(dir, &files, opts, &write_new_file)
 }
 
-/// `init` only generates `ctex`/`fontsetup` documents, which need a Unicode
-/// engine. `pdflatex` is rejected wherever an engine can still be chosen.
-fn ensure_supported_engine(engine: Engine) -> anyhow::Result<()> {
-    if engine == Engine::Pdflatex {
-        return Err(usage(
-            "`pdflatex` is not supported: the generated template uses `ctex` and `fontsetup`, which need `xelatex` or `lualatex`".to_owned(),
-        ));
-    }
-    Ok(())
+/// The files `init` creates, in reporting order.
+fn planned_files(answers: &prompt::Answers) -> [(&'static str, String); 3] {
+    [
+        (
+            "texmake.toml",
+            config_template(&answers.name, answers.engine),
+        ),
+        ("main.tex", main_template(answers)),
+        (".gitignore", "/build/\n".to_owned()),
+    ]
 }
 
-/// Ask for the project name, language and engine, in that order.
+/// Write the planned files into `dir`.
 ///
-/// Each prompt starts with the corresponding command-line value (or the target
-/// directory's name). A cancelled question aborts the command before anything is
-/// written.
-fn ask_options(dir: &Path, opts: &InitOptions) -> anyhow::Result<prompt::Answers> {
-    let dir_name = dir.file_name().and_then(|name| name.to_str());
-    let defaults = prompt::Answers {
-        name: opts
-            .name
-            .clone()
-            .or_else(|| dir_name.map(str::to_owned))
-            .unwrap_or_default(),
-        language: opts.language,
-        engine: opts.engine,
-    };
-    let mut prompter = prompt::InquirePrompter;
-    prompt::collect(&mut prompter, defaults)
-}
-
-/// Refuse targets that cannot be written as regular files, before the target
-/// directory or any file is created. An existing configuration is refused as a
-/// whole; other existing regular files are kept and skipped later.
-fn precheck_targets(config: &Path, main: &Path, gitignore: &Path) -> anyhow::Result<()> {
-    for (path, is_config) in [(config, true), (main, false), (gitignore, false)] {
-        let shown = path.display();
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.file_type().is_file() => {
-                return Err(usage(format!(
-                    "refusing to initialize: `{shown}` exists and is not a regular file"
-                )));
-            }
-            Ok(_) if is_config => {
-                return Err(usage(format!("refusing to overwrite `{shown}`")));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot inspect `{shown}`"));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Write `main.tex`, `.gitignore` and finally `texmake.toml` into `dir`.
-///
-/// `writer` is a parameter so tests can inject a failing write. Files created by
-/// this call are removed again when a later write fails; files that already
-/// existed are never touched.
+/// `main.tex` and `.gitignore` are written before `texmake.toml`, so a failure
+/// never leaves a configuration without its document files. Files created by
+/// this call are removed again when a later write fails. `writer` is a
+/// parameter so tests can inject a failing write.
 fn write_project(
     dir: &Path,
-    name: &str,
-    engine: Engine,
-    language: Language,
+    files: &[(&'static str, String); 3],
     opts: &InitOptions,
     writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
-    let config_path = dir.join("texmake.toml");
-    let files = [
-        (dir.join("main.tex"), "main.tex", main_template(language)),
-        (dir.join(".gitignore"), ".gitignore", "/build/\n".to_owned()),
-    ];
-
-    let mut created: Vec<PathBuf> = Vec::new();
+    // Write the configuration last.
+    let order = [1, 2, 0];
+    let mut created = Vec::new();
     let outcome = (|| -> anyhow::Result<()> {
-        for (path, label, content) in &files {
-            match writer(path, content) {
+        for &index in &order {
+            let (label, content) = &files[index];
+            let path = dir.join(label);
+            match writer(&path, content) {
                 Ok(()) => {
-                    created.push(path.clone());
+                    created.push(path);
                     if !opts.quiet {
                         println!("created {label}");
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if !opts.quiet {
-                        println!("skipped existing {label}");
-                    }
+                    return Err(usage(format!("refusing to overwrite `{}`", path.display())));
                 }
                 Err(error) => {
                     return Err(error)
@@ -225,30 +270,8 @@ fn write_project(
                 }
             }
         }
-
-        // The configuration goes last: a failure above never leaves a
-        // configuration without its document files.
-        match writer(&config_path, &config_template(name, engine)) {
-            Ok(()) => {
-                created.push(config_path.clone());
-                if !opts.quiet {
-                    println!("created texmake.toml");
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(usage(format!(
-                    "refusing to overwrite `{}`",
-                    config_path.display()
-                )));
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("cannot create `{}`", config_path.display()));
-            }
-        }
         Ok(())
     })();
-
     if let Err(error) = outcome {
         for path in created.iter().rev() {
             let _ = std::fs::remove_file(path);
@@ -265,31 +288,6 @@ fn write_new_file(path: &Path, content: &str) -> io::Result<()> {
         .create_new(true)
         .open(path)?;
     file.write_all(content.as_bytes())
-}
-
-/// The directory to initialize: `.` and an empty path mean the current
-/// directory, so the project name can be derived from its real name.
-fn target_dir(dir: &Path) -> anyhow::Result<PathBuf> {
-    if dir.as_os_str().is_empty() || dir == Path::new(".") {
-        return std::env::current_dir().context("cannot read working directory");
-    }
-    Ok(dir.to_path_buf())
-}
-
-/// The project name: `--name` wins, otherwise the target directory's name.
-fn project_name(dir: &Path, name: Option<&str>) -> Result<String, Error> {
-    if let Some(name) = name {
-        return Ok(name.to_owned());
-    }
-    dir.file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            Error::Usage(format!(
-                "cannot derive a project name from `{}`; pass `--name`",
-                dir.display()
-            ))
-        })
 }
 
 /// The generated `texmake.toml`.
@@ -312,18 +310,30 @@ steps = [
 }
 
 /// The generated `main.tex`.
-fn main_template(language: Language) -> String {
-    let preamble = match language {
-        Language::Zh => "\\usepackage[UTF8]{ctex}\n\\usepackage[default]{fontsetup}",
-        Language::En => "\\usepackage[default]{fontsetup}",
+fn main_template(answers: &prompt::Answers) -> String {
+    let font_line = match answers.font.fontsetup_option() {
+        Some(option) => format!("\\usepackage[{option}]{{fontsetup}}"),
+        None => answers
+            .font
+            .pdflatex_preamble()
+            .expect("a font without a fontsetup option is a pdflatex font")
+            .to_owned(),
     };
-    let body = match language {
-        Language::Zh => "你好，世界。",
-        Language::En => "Hello, world.",
+    let mut preamble = font_line;
+    if answers.ctex {
+        preamble.push('\n');
+        preamble.push_str("\\usepackage[UTF8]{ctex}");
+    }
+    let (class, body) = match (answers.doc_type, answers.ctex) {
+        (DocType::Article, false) => ("article", "Hello, world."),
+        (DocType::Article, true) => ("article", "你好，世界。"),
+        (DocType::Book, false) => ("book", "\\chapter{Introduction}\nHello, world."),
+        (DocType::Book, true) => ("book", "\\chapter{引言}\n你好，世界。"),
     };
     format!(
-        "\\documentclass{{article}}
+        "\\documentclass{{{class}}}
 {preamble}
+
 \\begin{{document}}
 {body}
 \\end{{document}}
@@ -350,6 +360,158 @@ fn escape_toml(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
+    use crate::prompt::Answers;
+
+    fn answers(doc_type: DocType, engine: Engine, font: Font, ctex: bool) -> Answers {
+        Answers {
+            name: "thesis".to_owned(),
+            doc_type,
+            engine,
+            font,
+            ctex,
+        }
+    }
+
+    #[test]
+    fn pdflatex_offers_two_fonts() {
+        assert_eq!(font_options(Engine::Pdflatex).len(), 2);
+        assert_eq!(font_options(Engine::Pdflatex)[0], Font::ComputerModern);
+        assert_eq!(font_options(Engine::Pdflatex)[1], Font::LatinModern);
+    }
+
+    #[test]
+    fn unicode_engines_offer_six_fonts() {
+        for engine in [Engine::Xelatex, Engine::Lualatex] {
+            let fonts = font_options(engine);
+            assert_eq!(fonts.len(), 6);
+            assert_eq!(fonts[0], Font::NewComputerModern);
+            assert_eq!(fonts[5], Font::StixTwo);
+        }
+    }
+
+    #[test]
+    fn the_template_matrix_has_the_expected_font_and_body_lines() {
+        for doc_type in DocType::OPTIONS {
+            for engine in [Engine::Pdflatex, Engine::Xelatex, Engine::Lualatex] {
+                for &font in font_options(engine) {
+                    for ctex in [false, true] {
+                        if ctex && !font.supports_chinese() {
+                            continue;
+                        }
+                        let answers = answers(doc_type, engine, font, ctex);
+                        let main = main_template(&answers);
+                        let class = doc_type.to_string();
+                        assert!(main.contains(&format!("\\documentclass{{{class}}}")));
+                        match font.fontsetup_option() {
+                            Some(option) => assert!(
+                                main.contains(&format!("\\usepackage[{option}]{{fontsetup}}")),
+                                "{doc_type:?} {engine} {font} ctex={ctex}: {main}"
+                            ),
+                            None => assert!(
+                                main.contains(font.pdflatex_preamble().unwrap()),
+                                "{doc_type:?} {engine} {font} ctex={ctex}: {main}"
+                            ),
+                        }
+                        assert_eq!(main.contains("\\usepackage[UTF8]{ctex}"), ctex);
+                        match (doc_type, ctex) {
+                            (DocType::Article, false) => {
+                                assert!(main.contains("Hello, world."));
+                            }
+                            (DocType::Article, true) => {
+                                assert!(main.contains("你好，世界。"));
+                            }
+                            (DocType::Book, false) => {
+                                assert!(main.contains("\\chapter{Introduction}"));
+                                assert!(main.contains("Hello, world."));
+                            }
+                            (DocType::Book, true) => {
+                                assert!(main.contains("\\chapter{引言}"));
+                                assert!(main.contains("你好，世界。"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn computer_modern_with_chinese_is_rejected() {
+        let mut prompter = FakePrompter::new(
+            DocType::Article,
+            Engine::Pdflatex,
+            Font::ComputerModern,
+            true,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_init_in(&mut prompter, &quiet(), dir.path()).expect_err("rejected");
+        let error = error.downcast::<Error>().expect("a usage error");
+        assert!(error.to_string().contains("Computer Modern"), "{error}");
+        assert!(!dir.path().join("thesis").exists());
+    }
+
+    #[test]
+    fn a_cancelled_question_removes_the_created_directory() {
+        let mut prompter =
+            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+        prompter.fail_at = Some("engine");
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_init_in(&mut prompter, &quiet(), dir.path()).expect_err("cancelled");
+        assert!(matches!(
+            error.downcast_ref::<Error>(),
+            Some(Error::Cancelled)
+        ));
+        assert!(!dir.path().join("thesis").exists());
+    }
+
+    #[test]
+    fn writes_the_project_described_by_the_answers() {
+        let mut prompter = FakePrompter::new(DocType::Book, Engine::Xelatex, Font::Concrete, false);
+        let dir = tempfile::tempdir().unwrap();
+        run_init_in(&mut prompter, &quiet(), dir.path()).expect("project");
+        let project = dir.path().join("thesis");
+        let config = std::fs::read_to_string(project.join("texmake.toml")).unwrap();
+        assert!(config.contains("name = \"thesis\""));
+        assert!(config.contains("{ latex = \"xelatex\" }"));
+        let main = std::fs::read_to_string(project.join("main.tex")).unwrap();
+        assert!(main.contains("\\documentclass{book}"));
+        assert!(main.contains("\\usepackage[concrete]{fontsetup}"));
+        assert!(main.contains("\\chapter{Introduction}"));
+        assert!(!main.contains("ctex"));
+        assert_eq!(
+            std::fs::read_to_string(project.join(".gitignore")).unwrap(),
+            "/build/\n"
+        );
+    }
+
+    #[test]
+    fn an_existing_directory_is_refused_before_asking_layout() {
+        let mut prompter =
+            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("thesis")).unwrap();
+        let error = run_init_in(&mut prompter, &quiet(), dir.path()).expect_err("exists");
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(prompter.calls, ["name"]);
+    }
+
+    #[test]
+    fn dry_run_prints_the_planned_files_and_writes_nothing() {
+        let mut prompter = FakePrompter::new(
+            DocType::Article,
+            Engine::Lualatex,
+            Font::NewComputerModern,
+            true,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let opts = InitOptions {
+            dry_run: true,
+            quiet: false,
+        };
+        run_init_in(&mut prompter, &opts, dir.path()).expect("dry run");
+        assert!(!dir.path().join("thesis").exists());
+    }
 
     #[test]
     fn writes_the_engine_and_name() {
@@ -366,84 +528,93 @@ mod tests {
     }
 
     #[test]
-    fn writes_language_specific_documents() {
-        let zh = main_template(Language::Zh);
-        assert!(zh.contains("\\documentclass{article}"));
-        assert!(zh.contains("\\usepackage[UTF8]{ctex}"));
-        assert!(zh.contains("\\usepackage[default]{fontsetup}"));
-        assert!(zh.contains("你好，世界。"));
-        assert!(!zh.contains("ctexart"));
-
-        let en = main_template(Language::En);
-        assert!(en.contains("\\documentclass{article}"));
-        assert!(en.contains("\\usepackage[default]{fontsetup}"));
-        assert!(en.contains("Hello, world."));
-        assert!(!en.contains("ctex"));
-    }
-
-    fn quiet_options(dir: &Path) -> InitOptions {
-        InitOptions {
-            dir: dir.to_path_buf(),
-            name: Some("t".to_owned()),
-            engine: Engine::Xelatex,
-            language: Language::En,
-            dry_run: false,
-            quiet: true,
-        }
-    }
-
-    #[test]
     fn failed_config_write_rolls_back_created_files() {
         let dir = tempfile::tempdir().unwrap();
-        let opts = quiet_options(dir.path());
+        let files = planned_files(&answers(
+            DocType::Article,
+            Engine::Xelatex,
+            Font::Concrete,
+            false,
+        ));
         let writer = |path: &Path, content: &str| {
             if path.ends_with("texmake.toml") {
                 return Err(io::Error::other("disk full"));
             }
             write_new_file(path, content)
         };
-        let error = write_project(
-            dir.path(),
-            "t",
-            Engine::Xelatex,
-            Language::En,
-            &opts,
-            &writer,
-        )
-        .unwrap_err();
+        let error = write_project(dir.path(), &files, &quiet(), &writer).unwrap_err();
         assert!(error.to_string().contains("texmake.toml"), "{error}");
         assert!(!dir.path().join("texmake.toml").exists());
         assert!(!dir.path().join("main.tex").exists());
         assert!(!dir.path().join(".gitignore").exists());
     }
 
-    #[test]
-    fn failed_config_write_keeps_files_that_already_existed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("main.tex"), "keep-me").unwrap();
-        let opts = quiet_options(dir.path());
-        let writer = |path: &Path, content: &str| {
-            if path.ends_with("texmake.toml") {
-                return Err(io::Error::other("disk full"));
+    fn quiet() -> InitOptions {
+        InitOptions {
+            dry_run: false,
+            quiet: true,
+        }
+    }
+
+    struct FakePrompter {
+        calls: Vec<&'static str>,
+        fail_at: Option<&'static str>,
+        doc_type: DocType,
+        engine: Engine,
+        font: Font,
+        ctex: bool,
+    }
+
+    impl FakePrompter {
+        fn new(doc_type: DocType, engine: Engine, font: Font, ctex: bool) -> Self {
+            Self {
+                calls: Vec::new(),
+                fail_at: None,
+                doc_type,
+                engine,
+                font,
+                ctex,
             }
-            write_new_file(path, content)
-        };
-        assert!(
-            write_project(
-                dir.path(),
-                "t",
-                Engine::Xelatex,
-                Language::En,
-                &opts,
-                &writer,
-            )
-            .is_err()
-        );
-        assert!(!dir.path().join("texmake.toml").exists());
-        assert!(!dir.path().join(".gitignore").exists());
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("main.tex")).unwrap(),
-            "keep-me"
-        );
+        }
+    }
+
+    impl prompt::Prompter for FakePrompter {
+        fn ask_name(&mut self, _default: &str) -> anyhow::Result<String> {
+            self.calls.push("name");
+            Ok("thesis".to_owned())
+        }
+
+        fn ask_doc_type(&mut self, _default: DocType) -> anyhow::Result<DocType> {
+            self.calls.push("doc_type");
+            self.fail_if("doc_type")?;
+            Ok(self.doc_type)
+        }
+
+        fn ask_engine(&mut self, _default: Engine) -> anyhow::Result<Engine> {
+            self.calls.push("engine");
+            self.fail_if("engine")?;
+            Ok(self.engine)
+        }
+
+        fn ask_font(&mut self, _engine: Engine, _default: Font) -> anyhow::Result<Font> {
+            self.calls.push("font");
+            self.fail_if("font")?;
+            Ok(self.font)
+        }
+
+        fn ask_ctex(&mut self, _default: bool) -> anyhow::Result<bool> {
+            self.calls.push("ctex");
+            self.fail_if("ctex")?;
+            Ok(self.ctex)
+        }
+    }
+
+    impl FakePrompter {
+        fn fail_if(&self, step: &'static str) -> anyhow::Result<()> {
+            if self.fail_at == Some(step) {
+                return Err(Error::Cancelled.into());
+            }
+            Ok(())
+        }
     }
 }
