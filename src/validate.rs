@@ -561,17 +561,64 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
         if !seen.insert(dir.clone()) {
             return Err(loaded.error_at(at, format!("duplicate workspace member `{display}`")));
         }
-        if !dir.is_dir() {
+        // Resolve symlinks before trusting the member: a link can point out of
+        // the workspace, and a dangling or looping link cannot be validated.
+        let resolved = dir.canonicalize().map_err(|error| {
+            loaded.error_at(
+                at.clone(),
+                format!(
+                    "workspace member `{display}`: cannot resolve `{}`: {error}",
+                    dir.display()
+                ),
+            )
+        })?;
+        if resolved == root {
+            return Err(loaded.error_at(
+                at,
+                format!(
+                    "workspace member `{display}`: `{}` is the workspace root",
+                    resolved.display()
+                ),
+            ));
+        }
+        if !resolved.starts_with(&root) {
+            return Err(loaded.error_at(
+                at,
+                format!(
+                    "workspace member `{display}`: `{}` resolves outside the workspace root",
+                    resolved.display()
+                ),
+            ));
+        }
+        if !resolved.is_dir() {
             return Err(loaded.error_at(
                 at,
                 format!("workspace member `{display}` is not a directory"),
             ));
         }
-        let config_path = dir.join(FILE_NAME);
+        let config_path = resolved.join(FILE_NAME);
         if !config_path.is_file() {
             return Err(loaded.error_at(
                 at,
                 format!("workspace member `{display}` has no {FILE_NAME}"),
+            ));
+        }
+        let config_path = config_path.canonicalize().map_err(|error| {
+            loaded.error_at(
+                at.clone(),
+                format!(
+                    "workspace member `{display}`: cannot resolve `{}`: {error}",
+                    config_path.display()
+                ),
+            )
+        })?;
+        if config_path == root || !config_path.starts_with(&root) {
+            return Err(loaded.error_at(
+                at,
+                format!(
+                    "workspace member `{display}`: `{}` resolves outside the workspace root",
+                    config_path.display()
+                ),
             ));
         }
         let config = crate::config::load(&config_path)

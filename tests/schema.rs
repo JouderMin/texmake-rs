@@ -281,3 +281,136 @@ fn tools_accept_a_command_string_or_a_table() {
     );
     assert_eq!(table["properties"]["args"]["items"]["type"], "string");
 }
+
+// ---------------------------------------------------------------------------
+// Real validation with `jsonschema` (draft 2020-12)
+// ---------------------------------------------------------------------------
+
+fn validator() -> jsonschema::Validator {
+    jsonschema::validator_for(&schema())
+        .expect("the configuration schema must be a valid JSON Schema")
+}
+
+fn project_config() -> Value {
+    serde_json::json!({
+        "project": {
+            "name": "thesis",
+            "main": "main.tex",
+            "output": "build",
+            "default": "release"
+        },
+        "tools": {
+            "graphviz": { "command": "dot", "args": ["-Tpdf", "-o", "{output}/graph.pdf"] },
+            "pandoc": "pandoc"
+        },
+        "recipes": {
+            "release": {
+                "steps": [
+                    { "latex": "xelatex" },
+                    { "biber": true },
+                    { "run": "sh scripts/gen.sh {name}" },
+                    { "tool": "graphviz", "args": ["{root}/graph.dot"] }
+                ]
+            },
+            "draft": {
+                "main": "paper.tex",
+                "output": "build/draft",
+                "steps": [{ "latex": "lualatex", "args": ["-draftmode"] }]
+            }
+        }
+    })
+}
+
+fn workspace_config() -> Value {
+    serde_json::json!({ "workspace": { "members": ["paper", "slides"] } })
+}
+
+/// The validator must accept `config`; a failure prints the schema errors.
+fn assert_valid(config: &Value) {
+    let errors: Vec<String> = validator()
+        .iter_errors(config)
+        .map(|error| error.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "expected a valid configuration, got {errors:?}"
+    );
+}
+
+/// The validator must reject `config`; a failure prints the instance.
+fn assert_invalid(config: &Value) {
+    assert!(
+        !validator().is_valid(config),
+        "expected an invalid configuration, got {config}"
+    );
+}
+
+#[test]
+fn a_project_configuration_passes_validation() {
+    assert_valid(&project_config());
+    // A project without recipes is structurally valid; validation of "at
+    // least one recipe" is a semantic rule of `texmake check`, not the schema.
+    assert_valid(&serde_json::json!({
+        "project": { "name": "minimal", "main": "main.tex" }
+    }));
+}
+
+#[test]
+fn a_workspace_configuration_passes_validation() {
+    assert_valid(&workspace_config());
+    // An empty workspace is what `texmake init` writes.
+    assert_valid(&serde_json::json!({ "workspace": { "members": [] } }));
+}
+
+#[test]
+fn the_project_and_workspace_shapes_are_mutually_exclusive() {
+    let mut both = project_config();
+    both["workspace"] = serde_json::json!({ "members": ["paper"] });
+    assert_invalid(&both);
+}
+
+#[test]
+fn a_workspace_without_members_is_rejected() {
+    assert_invalid(&serde_json::json!({ "workspace": {} }));
+}
+
+#[test]
+fn workspace_members_must_be_an_array_of_strings() {
+    assert_invalid(&serde_json::json!({ "workspace": { "members": "paper" } }));
+    assert_invalid(&serde_json::json!({ "workspace": { "members": [1] } }));
+}
+
+#[test]
+fn unknown_keys_are_rejected_by_the_schema() {
+    let mut with_unknown_root_key = project_config();
+    with_unknown_root_key["bogus"] = serde_json::json!(1);
+    assert_invalid(&with_unknown_root_key);
+
+    let mut with_unknown_project_key = project_config();
+    with_unknown_project_key["project"]["bogus"] = serde_json::json!(1);
+    assert_invalid(&with_unknown_project_key);
+
+    assert_invalid(&serde_json::json!({
+        "project": { "name": "t", "main": "main.tex" },
+        "recipes": { "release": { "steps": [{ "latex": "xelatex", "bogus": true }] } }
+    }));
+}
+
+#[test]
+fn step_actions_are_enforced_by_the_schema() {
+    // Two action keys in one step.
+    assert_invalid(&serde_json::json!({
+        "project": { "name": "t", "main": "main.tex" },
+        "recipes": { "release": { "steps": [{ "latex": "xelatex", "biber": true }] } }
+    }));
+    // `run` must not take `args`.
+    assert_invalid(&serde_json::json!({
+        "project": { "name": "t", "main": "main.tex" },
+        "recipes": { "release": { "steps": [{ "run": "sh gen.sh", "args": [] }] } }
+    }));
+    // Only the three known engines are accepted.
+    assert_invalid(&serde_json::json!({
+        "project": { "name": "t", "main": "main.tex" },
+        "recipes": { "release": { "steps": [{ "latex": "tectonic" }] } }
+    }));
+}

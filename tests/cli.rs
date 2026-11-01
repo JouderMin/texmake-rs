@@ -1361,3 +1361,258 @@ fn workspace_dry_run_prints_member_commands_without_building() {
     assert!(stdout.contains("xelatex"), "{stdout}");
     assert!(!f.path("paper/build").exists());
 }
+
+// ---------------------------------------------------------------------------
+// Workspace members: symlinks, non-directories and workspace-level options
+// ---------------------------------------------------------------------------
+
+/// A `texmake` command rooted at `dir` with the fixture-local `PATH`.
+fn cmd_at(f: &Fixture, dir: &std::path::Path) -> assert_cmd::Command {
+    let mut command = assert_cmd::Command::cargo_bin("texmake").unwrap();
+    command
+        .current_dir(dir)
+        .env("PATH", format!("{}:/usr/bin:/bin", f.path("bin").display()));
+    command
+}
+
+/// A fake xelatex that appends one line to `counter` on every run.
+fn fake_counting_tool(f: &Fixture) -> PathBuf {
+    let counter = f.path("runs.txt");
+    f.fake_tool(
+        "xelatex",
+        &format!(
+            "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${{arg#-output-directory=}}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\nprintf 'run\\n' >> '{}'\n",
+            counter.display()
+        ),
+    )
+}
+
+/// Count the runs recorded by [`fake_counting_tool`].
+fn run_count(f: &Fixture) -> usize {
+    std::fs::read_to_string(f.path("runs.txt"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_rejects_a_symlink_member_that_escapes_the_root() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("texmake.toml"),
+        "[project]\nname = \"outside\"\nmain = \"main.tex\"\n[recipes.release]\nsteps = [{ latex = \"xelatex\" }]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        outside.path().join("main.tex"),
+        "\\documentclass{article}\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.path("paper")).unwrap();
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member `paper`:"), "{stderr}");
+    assert!(
+        stderr.contains("resolves outside the workspace root"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&outside.path().canonicalize().unwrap().display().to_string()),
+        "the error must name the resolved path: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_accepts_a_symlink_to_a_project_inside_the_root() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    write_member(&f, "paper-src", "paper");
+    std::os::unix::fs::symlink(f.path("paper-src"), f.path("paper")).unwrap();
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("project: paper"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_rejects_a_dangling_symlink_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    std::os::unix::fs::symlink(f.path("nowhere"), f.path("paper")).unwrap();
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member `paper`:"), "{stderr}");
+    assert!(stderr.contains("cannot resolve"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_rejects_a_symlink_loop_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    std::os::unix::fs::symlink(f.path("paper"), f.path("paper")).unwrap();
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member `paper`:"), "{stderr}");
+    assert!(stderr.contains("cannot resolve"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_rejects_a_symlinked_config_that_escapes_the_root() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    f.write("paper/main.tex", "\\documentclass{article}\n");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("texmake.toml"),
+        "[project]\nname = \"outside\"\nmain = \"main.tex\"\n[recipes.release]\nsteps = [{ latex = \"xelatex\" }]\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("texmake.toml"),
+        f.path("paper/texmake.toml"),
+    )
+    .unwrap();
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member `paper`:"), "{stderr}");
+    assert!(
+        stderr.contains("resolves outside the workspace root"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn workspace_rejects_a_member_that_is_not_a_directory() {
+    let f = Fixture::new();
+    write_workspace(&f, &["file.txt"]);
+    f.write("file.txt", "not a directory\n");
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("member `file.txt`"), "{stderr}");
+    assert!(stderr.contains("is not a directory"), "{stderr}");
+}
+
+#[test]
+fn workspace_force_rebuilds_every_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    fake_counting_tool(&f);
+
+    f.cmd().arg("build").output().unwrap();
+    assert_eq!(run_count(&f), 2, "the first build must run every member");
+
+    let out = f.cmd().arg("build").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert_eq!(run_count(&f), 2, "an up-to-date workspace must not rebuild");
+
+    let out = f.cmd().args(["-B", "build"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert_eq!(run_count(&f), 4, "-B must rebuild every member");
+}
+
+#[test]
+fn workspace_accepts_a_file_option_from_another_directory() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    write_member(&f, "paper", "paper");
+    std::fs::create_dir_all(f.path("sub")).unwrap();
+
+    let out = cmd_at(&f, &f.path("sub"))
+        .args(["-f", "../texmake.toml", "check"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("project: paper"), "{stdout}");
+}
+
+#[test]
+fn workspace_verbose_streams_member_output() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    write_member(&f, "paper", "paper");
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${arg#-output-directory=}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\necho \"hello from paper\"\n",
+    );
+
+    let out = f.cmd().args(["-v", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    let heading = stdout.find("==> paper").unwrap();
+    let streamed = stdout
+        .find("hello from paper")
+        .unwrap_or_else(|| panic!("the tool output must be streamed: {stdout}"));
+    assert!(heading < streamed, "{stdout}");
+}
+
+#[test]
+fn workspace_clean_dry_run_prints_and_keeps_outputs() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    f.write("paper/build/main.pdf", "pdf");
+    f.write("slides/build/main.pdf", "pdf");
+
+    let out = f.cmd().args(["-n", "clean"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(f.path("paper/build/main.pdf").is_file());
+    assert!(f.path("slides/build/main.pdf").is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(stdout.contains("would remove build"), "{stdout}");
+}
+
+#[test]
+fn workspace_quiet_clean_prints_nothing() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    f.write("paper/build/main.pdf", "pdf");
+    f.write("slides/build/main.pdf", "pdf");
+
+    let out = f.cmd().args(["-q", "clean"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(!f.path("paper/build").exists());
+    assert!(!f.path("slides/build").exists());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
