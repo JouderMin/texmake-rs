@@ -28,11 +28,11 @@ use clap::{Parser, Subcommand};
 
 use crate::build::{self, BuildOptions};
 use crate::clean;
-use crate::config::{self, LoadedConfig};
+use crate::config::{self, LoadedConfig, LoadedWorkspace};
 use crate::error::Error;
 use crate::init;
 use crate::recipe;
-use crate::validate::{self, Project};
+use crate::validate::{self, Project, WorkspaceMember};
 
 /// texmake: a make-like build tool for LaTeX document projects.
 #[derive(Debug, Parser)]
@@ -154,15 +154,10 @@ fn check_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
             print_check(&project);
             Ok(())
         }
-        LoadedConfig::Workspace(loaded) => {
-            let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
-            require_members(&workspace)?;
-            for member in validate::select_members(&workspace, &cli.project)? {
-                heading(cli, &member.display);
-                print_check(&member.project);
-            }
+        LoadedConfig::Workspace(loaded) => for_each_member(cli, loaded, |member| {
+            print_check(&member.project);
             Ok(())
-        }
+        }),
     }
 }
 
@@ -173,16 +168,10 @@ fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
             let project = validate::build_plan(loaded).map_err(Error::from)?;
             clean::run_clean(&project, cli.dry_run, cli.quiet)
         }
-        LoadedConfig::Workspace(loaded) => {
-            let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
-            require_members(&workspace)?;
-            for member in validate::select_members(&workspace, &cli.project)? {
-                heading(cli, &member.display);
-                clean::run_clean(&member.project, cli.dry_run, cli.quiet)
-                    .map_err(|error| member_context(&member.display, error))?;
-            }
-            Ok(())
-        }
+        LoadedConfig::Workspace(loaded) => for_each_member(cli, loaded, |member| {
+            clean::run_clean(&member.project, cli.dry_run, cli.quiet)
+                .map_err(|error| member_context(&member.display, error))
+        }),
     }
 }
 
@@ -200,19 +189,31 @@ fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> anyhow
             let recipe = recipe::select_recipe(&project, name)?;
             build::run_build(&project, recipe, &options)
         }
-        LoadedConfig::Workspace(loaded) => {
-            let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
-            require_members(&workspace)?;
-            for member in validate::select_members(&workspace, &cli.project)? {
-                heading(cli, &member.display);
-                let recipe = recipe::select_recipe(&member.project, name)
-                    .map_err(|error| member_context(&member.display, error.into()))?;
-                build::run_build(&member.project, recipe, &options)
-                    .map_err(|error| member_context(&member.display, error))?;
-            }
-            Ok(())
-        }
+        LoadedConfig::Workspace(loaded) => for_each_member(cli, loaded, |member| {
+            let recipe = recipe::select_recipe(&member.project, name)
+                .map_err(|error| member_context(&member.display, error.into()))?;
+            build::run_build(&member.project, recipe, &options)
+                .map_err(|error| member_context(&member.display, error))
+        }),
     }
+}
+
+/// Run `action` once per selected workspace member, under its heading.
+///
+/// The workspace is validated and its member selection resolved first; an
+/// empty selection is a usage error.
+fn for_each_member(
+    cli: &Cli,
+    loaded: &LoadedWorkspace,
+    mut action: impl FnMut(&WorkspaceMember) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
+    require_members(&workspace)?;
+    for member in validate::select_members(&workspace, &cli.project)? {
+        heading(cli, &member.display);
+        action(member)?;
+    }
+    Ok(())
 }
 
 /// Reject `-p` outside a workspace.
