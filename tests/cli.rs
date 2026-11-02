@@ -1616,3 +1616,185 @@ fn workspace_quiet_clean_prints_nothing() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Workspace member selection with -p / --project
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_build_with_one_project_builds_only_that_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    fake_pdf_tool(&f);
+
+    let out = f.cmd().args(["-p", "paper", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(f.path("paper/build/main.pdf").is_file());
+    assert!(!f.path("slides/build").exists());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(!stdout.contains("==> slides"), "{stdout}");
+}
+
+#[test]
+fn workspace_build_with_two_projects_keeps_member_order() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    fake_pdf_tool(&f);
+
+    // Selected in reverse order, executed in `members` order.
+    let out = f
+        .cmd()
+        .args(["-p", "slides", "-p", "paper", "build"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(f.path("paper/build/main.pdf").is_file());
+    assert!(f.path("slides/build/main.pdf").is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let paper = stdout
+        .find("==> paper")
+        .unwrap_or_else(|| panic!("paper must be built: {stdout}"));
+    let slides = stdout
+        .find("==> slides")
+        .unwrap_or_else(|| panic!("slides must be built: {stdout}"));
+    assert!(paper < slides, "members order must be kept: {stdout}");
+}
+
+#[test]
+fn workspace_repeated_project_flags_select_the_member_once() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper"]);
+    write_member(&f, "paper", "paper");
+    fake_counting_tool(&f);
+
+    let out = f
+        .cmd()
+        .args(["-p", "paper", "-p", "paper", "build"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert_eq!(run_count(&f), 1, "a repeated -p value must not build twice");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.matches("==> paper").count(), 1, "{stdout}");
+}
+
+#[test]
+fn workspace_unknown_project_lists_the_available_names() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+
+    let out = f.cmd().args(["-p", "nope", "check"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown project `nope`"), "{stderr}");
+    assert!(stderr.contains("available: paper, slides"), "{stderr}");
+}
+
+#[test]
+fn project_flag_is_rejected_in_a_single_project() {
+    let f = Fixture::new();
+
+    let out = f.cmd().args(["-p", "paper", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("only valid in a workspace"), "{stderr}");
+}
+
+#[test]
+fn project_flag_is_rejected_by_init() {
+    let f = Fixture::new();
+
+    let out = f.cmd().args(["-p", "x", "init"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("only valid in a workspace"), "{stderr}");
+}
+
+#[test]
+fn workspace_rejects_duplicate_member_project_names() {
+    let f = Fixture::new();
+    write_workspace(&f, &["a", "b"]);
+    write_member(&f, "a", "paper");
+    write_member(&f, "b", "paper");
+
+    let out = f.cmd().arg("check").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("duplicate project name `paper`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("a/texmake.toml"), "{stderr}");
+    assert!(stderr.contains("b/texmake.toml"), "{stderr}");
+}
+
+#[test]
+fn workspace_check_with_project_selects_one_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+
+    let out = f.cmd().args(["-p", "paper", "check"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(!stdout.contains("==> slides"), "{stdout}");
+    assert!(!stdout.contains("project: slides"), "{stdout}");
+}
+
+#[test]
+fn workspace_clean_with_project_keeps_the_other_outputs() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    f.write("paper/build/main.pdf", "pdf");
+    f.write("slides/build/main.pdf", "pdf");
+
+    let out = f.cmd().args(["-p", "paper", "clean"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(!f.path("paper/build").exists());
+    assert!(f.path("slides/build/main.pdf").is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(!stdout.contains("==> slides"), "{stdout}");
+}
+
+#[test]
+fn workspace_dry_run_with_project_prints_only_the_selected_steps() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+
+    let out = f
+        .cmd()
+        .args(["-n", "-p", "paper", "build"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(!f.path("paper/build").exists());
+    assert!(!f.path("slides/build").exists());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("==> paper"), "{stdout}");
+    assert!(!stdout.contains("==> slides"), "{stdout}");
+    assert_eq!(stdout.matches("xelatex").count(), 1, "{stdout}");
+}

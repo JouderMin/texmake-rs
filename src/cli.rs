@@ -63,6 +63,10 @@ pub struct Cli {
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
 
+    /// Only process the named workspace members; may be repeated.
+    #[arg(short = 'p', long = "project", global = true, value_name = "name")]
+    pub project: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -119,6 +123,7 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
     // `init` creates a new project and must not require an existing
     // configuration; every other command loads the project first.
     if matches!(cli.command, Some(Command::Init)) {
+        reject_project_flag(&cli)?;
         let options = init::InitOptions {
             dry_run: cli.dry_run,
             quiet: cli.quiet,
@@ -126,6 +131,9 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
         return init::run_init(&options);
     }
     let loaded = load_project(&cli)?;
+    if matches!(&loaded, LoadedConfig::Project(_)) {
+        reject_project_flag(&cli)?;
+    }
     match &cli.command {
         Some(Command::Check) => check_command(&cli, &loaded),
         Some(Command::Build { name }) => build_command(&cli, &loaded, name.as_deref()),
@@ -149,7 +157,7 @@ fn check_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
         LoadedConfig::Workspace(loaded) => {
             let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
             require_members(&workspace)?;
-            for member in &workspace.members {
+            for member in validate::select_members(&workspace, &cli.project)? {
                 heading(cli, &member.display);
                 print_check(&member.project);
             }
@@ -168,7 +176,7 @@ fn clean_command(cli: &Cli, loaded: &LoadedConfig) -> anyhow::Result<()> {
         LoadedConfig::Workspace(loaded) => {
             let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
             require_members(&workspace)?;
-            for member in &workspace.members {
+            for member in validate::select_members(&workspace, &cli.project)? {
                 heading(cli, &member.display);
                 clean::run_clean(&member.project, cli.dry_run, cli.quiet)
                     .map_err(|error| member_context(&member.display, error))?;
@@ -195,7 +203,7 @@ fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> anyhow
         LoadedConfig::Workspace(loaded) => {
             let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
             require_members(&workspace)?;
-            for member in &workspace.members {
+            for member in validate::select_members(&workspace, &cli.project)? {
                 heading(cli, &member.display);
                 let recipe = recipe::select_recipe(&member.project, name)
                     .map_err(|error| member_context(&member.display, error.into()))?;
@@ -205,6 +213,16 @@ fn build_command(cli: &Cli, loaded: &LoadedConfig, name: Option<&str>) -> anyhow
             Ok(())
         }
     }
+}
+
+/// Reject `-p` outside a workspace.
+fn reject_project_flag(cli: &Cli) -> anyhow::Result<()> {
+    if cli.project.is_empty() {
+        return Ok(());
+    }
+    Err(crate::error::usage(
+        "`-p` is only valid in a workspace".to_owned(),
+    ))
 }
 
 /// Print the `==> {member}` heading that separates workspace members.

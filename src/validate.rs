@@ -31,7 +31,7 @@ use crate::config::{
     FILE_NAME, LoadedConfig, LoadedProject, LoadedWorkspace, RawRecipe, RawStep, RawTool,
 };
 use crate::engine::Engine;
-use crate::error::ConfigError;
+use crate::error::{ConfigError, Error};
 use crate::paths;
 use crate::vars::{self, Vars};
 
@@ -537,6 +537,7 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
     })?;
     let mut members = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut names: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for indexed in loaded.workspace.members.get_ref() {
         let display = indexed.get_ref().clone();
@@ -634,11 +635,59 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
             }
         };
         let project = build_plan(&member)
-            .map_err(|reason| loaded.error_at(at, format!("member {display}: {reason}")))?;
+            .map_err(|reason| loaded.error_at(at.clone(), format!("member {display}: {reason}")))?;
+        if let Some(previous) = names.insert(project.name.clone(), project.config_path.clone()) {
+            return Err(loaded.error_at(
+                at,
+                format!(
+                    "workspace has duplicate project name `{}`: {}, {}",
+                    project.name,
+                    previous.display(),
+                    project.config_path.display()
+                ),
+            ));
+        }
         members.push(WorkspaceMember { display, project });
     }
 
     Ok(Workspace { root, members })
+}
+
+/// Keep only the members selected by `-p`.
+///
+/// An empty selection keeps every member. Names match `[project] name`
+/// exactly and case-sensitively; the result keeps the `members` order, so a
+/// repeated name selects its member only once. An unknown name is a usage
+/// error that lists the available project names.
+pub fn select_members<'a>(
+    workspace: &'a Workspace,
+    names: &[String],
+) -> Result<Vec<&'a WorkspaceMember>, Error> {
+    if names.is_empty() {
+        return Ok(workspace.members.iter().collect());
+    }
+    for name in names {
+        if !workspace
+            .members
+            .iter()
+            .any(|member| member.project.name == *name)
+        {
+            let available = workspace
+                .members
+                .iter()
+                .map(|member| member.project.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::Usage(format!(
+                "unknown project `{name}`: available: {available}"
+            )));
+        }
+    }
+    Ok(workspace
+        .members
+        .iter()
+        .filter(|member| names.contains(&member.project.name))
+        .collect())
 }
 
 /// Turn a member configuration failure into a positioned workspace error.
