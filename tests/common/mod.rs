@@ -24,7 +24,7 @@
 //! there, with `PATH` pointing at the fixture-local `bin/` directory first so
 //! tests can install fake tools.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_CONFIG: &str = r#"[project]
 name = "fixture"
@@ -102,4 +102,66 @@ impl Fixture {
         );
         command
     }
+}
+
+/// A `texmake` command rooted at `dir` with the fixture-local `PATH`.
+pub fn cmd_at(f: &Fixture, dir: &Path) -> assert_cmd::Command {
+    let mut command = assert_cmd::Command::cargo_bin("texmake").unwrap();
+    command
+        .current_dir(dir)
+        .env("PATH", format!("{}:/usr/bin:/bin", f.path("bin").display()));
+    command
+}
+
+/// Overwrite the root configuration with a `[workspace]` table.
+pub fn write_workspace(f: &Fixture, members: &[&str]) {
+    let list = members
+        .iter()
+        .map(|member| format!("\"{member}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    f.write_toml(&format!("[workspace]\nmembers = [{list}]\n"));
+}
+
+/// Write a minimal project configuration into `dir`.
+pub fn write_member(f: &Fixture, dir: &str, name: &str) {
+    f.write(
+        &format!("{dir}/texmake.toml"),
+        &format!(
+            "[project]\nname = \"{name}\"\nmain = \"main.tex\"\n\
+             [recipes.release]\nsteps = [{{ latex = \"xelatex\" }}]\n"
+        ),
+    );
+    f.write(
+        &format!("{dir}/main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nHi.\n\\end{document}\n",
+    );
+}
+
+/// A fake xelatex that writes `build/main.pdf`, so builds produce a PDF.
+pub fn fake_pdf_tool(f: &Fixture) -> PathBuf {
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${arg#-output-directory=}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\n",
+    )
+}
+
+/// A fake xelatex that appends one line to `runs.txt` on every run.
+pub fn fake_counting_tool(f: &Fixture) -> PathBuf {
+    let counter = f.path("runs.txt");
+    f.fake_tool(
+        "xelatex",
+        &format!(
+            "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${{arg#-output-directory=}}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\nprintf 'run\\n' >> '{}'\n",
+            counter.display()
+        ),
+    )
+}
+
+/// Count the runs recorded by [`fake_counting_tool`].
+pub fn run_count(f: &Fixture) -> usize {
+    std::fs::read_to_string(f.path("runs.txt"))
+        .unwrap_or_default()
+        .lines()
+        .count()
 }

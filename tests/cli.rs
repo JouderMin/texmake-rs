@@ -18,9 +18,9 @@
 
 mod common;
 
-use std::path::PathBuf;
-
-use common::Fixture;
+use common::{
+    Fixture, cmd_at, fake_counting_tool, fake_pdf_tool, run_count, write_member, write_workspace,
+};
 
 #[test]
 fn help_lists_all_commands() {
@@ -1100,43 +1100,6 @@ fn init_requires_a_terminal() {
     assert!(stderr.contains("init needs a terminal"), "{stderr}");
 }
 
-// ---------------------------------------------------------------------------
-// Workspaces
-// ---------------------------------------------------------------------------
-
-/// Overwrite the root configuration with a `[workspace]` table.
-fn write_workspace(f: &Fixture, members: &[&str]) {
-    let list = members
-        .iter()
-        .map(|member| format!("\"{member}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    f.write_toml(&format!("[workspace]\nmembers = [{list}]\n"));
-}
-
-/// Write a minimal project configuration into `dir`.
-fn write_member(f: &Fixture, dir: &str, name: &str) {
-    f.write(
-        &format!("{dir}/texmake.toml"),
-        &format!(
-            "[project]\nname = \"{name}\"\nmain = \"main.tex\"\n\
-             [recipes.release]\nsteps = [{{ latex = \"xelatex\" }}]\n"
-        ),
-    );
-    f.write(
-        &format!("{dir}/main.tex"),
-        "\\documentclass{article}\n\\begin{document}\nHi.\n\\end{document}\n",
-    );
-}
-
-/// A fake xelatex that writes `build/main.pdf`, so builds produce a PDF.
-fn fake_pdf_tool(f: &Fixture) -> PathBuf {
-    f.fake_tool(
-        "xelatex",
-        "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${arg#-output-directory=}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\n",
-    )
-}
-
 #[test]
 fn workspace_build_builds_every_member() {
     let f = Fixture::new();
@@ -1360,39 +1323,6 @@ fn workspace_dry_run_prints_member_commands_without_building() {
     assert!(stdout.contains("==> paper"), "{stdout}");
     assert!(stdout.contains("xelatex"), "{stdout}");
     assert!(!f.path("paper/build").exists());
-}
-
-// ---------------------------------------------------------------------------
-// Workspace members: symlinks, non-directories and workspace-level options
-// ---------------------------------------------------------------------------
-
-/// A `texmake` command rooted at `dir` with the fixture-local `PATH`.
-fn cmd_at(f: &Fixture, dir: &std::path::Path) -> assert_cmd::Command {
-    let mut command = assert_cmd::Command::cargo_bin("texmake").unwrap();
-    command
-        .current_dir(dir)
-        .env("PATH", format!("{}:/usr/bin:/bin", f.path("bin").display()));
-    command
-}
-
-/// A fake xelatex that appends one line to `counter` on every run.
-fn fake_counting_tool(f: &Fixture) -> PathBuf {
-    let counter = f.path("runs.txt");
-    f.fake_tool(
-        "xelatex",
-        &format!(
-            "#!/bin/sh\nout=build\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -output-directory=*) out=\"${{arg#-output-directory=}}\";;\n  esac\ndone\nmkdir -p \"$out\"\nprintf 'pdf' > \"$out/main.pdf\"\nprintf 'run\\n' >> '{}'\n",
-            counter.display()
-        ),
-    )
-}
-
-/// Count the runs recorded by [`fake_counting_tool`].
-fn run_count(f: &Fixture) -> usize {
-    std::fs::read_to_string(f.path("runs.txt"))
-        .unwrap_or_default()
-        .lines()
-        .count()
 }
 
 #[cfg(unix)]
