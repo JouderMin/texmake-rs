@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 
-use crate::error::{BuildFailed, Error};
+use crate::error::{BuildFailed, Error, Termination};
 use crate::recipe::{self, ExecSpec, ResolvedStep};
 use crate::up_to_date;
 use crate::validate::{Project, Recipe};
@@ -256,7 +256,11 @@ fn run_step(
         .wait()
         .with_context(|| format!("cannot wait for `{}`", exec.program))?;
     let (exit_code, signal) = status_parts(status);
-    write_log(log, log_path, &format_exit_status(exit_code, signal))?;
+    write_log(
+        log,
+        log_path,
+        &Termination::new(exit_code, signal).log_line(),
+    )?;
     if status.success() {
         return Ok(());
     }
@@ -399,15 +403,6 @@ fn status_parts(status: ExitStatus) -> (Option<i32>, Option<i32>) {
     #[cfg(not(unix))]
     {
         (status.code(), None)
-    }
-}
-
-/// The bracketed exit status line that closes a step in the log.
-fn format_exit_status(exit_code: Option<i32>, signal: Option<i32>) -> String {
-    match (exit_code, signal) {
-        (_, Some(signal)) => format!("[signal {signal}]"),
-        (Some(code), None) => format!("[{code}]"),
-        (None, None) => "[unknown]".to_owned(),
     }
 }
 

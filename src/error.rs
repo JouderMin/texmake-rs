@@ -84,7 +84,7 @@ fn render_tools(tools: &[String]) -> String {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "error: step failed\n  command: {command}\n  exit code: {}\n  last 20 lines:{}\n  log: {}",
-    exit_line(*exit_code, *signal),
+    Termination::new(*exit_code, *signal).report_line(),
     tail_lines(tail),
     log.display()
 )]
@@ -101,12 +101,38 @@ pub struct BuildFailed {
     pub log: PathBuf,
 }
 
-/// The `exit code:` value, including the signal note when one is known.
-fn exit_line(exit_code: Option<i32>, signal: Option<i32>) -> String {
-    match (exit_code, signal) {
-        (_, Some(signal)) => format!("signal {signal}\n  terminated by signal {signal}"),
-        (Some(code), None) => code.to_string(),
-        (None, None) => "unknown".to_owned(),
+/// How a step ended: an exit code, a terminating signal, or neither.
+///
+/// The build log and the failure report render the same fact differently, so
+/// both renderings live here next to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Termination {
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+}
+
+impl Termination {
+    pub(crate) fn new(exit_code: Option<i32>, signal: Option<i32>) -> Self {
+        Self { exit_code, signal }
+    }
+
+    /// The `exit code:` value of a failure report, including the signal note
+    /// when one is known.
+    pub(crate) fn report_line(self) -> String {
+        match (self.exit_code, self.signal) {
+            (_, Some(signal)) => format!("signal {signal}\n  terminated by signal {signal}"),
+            (Some(code), None) => code.to_string(),
+            (None, None) => "unknown".to_owned(),
+        }
+    }
+
+    /// The bracketed status line that closes a step in the build log.
+    pub(crate) fn log_line(self) -> String {
+        match (self.exit_code, self.signal) {
+            (_, Some(signal)) => format!("[signal {signal}]"),
+            (Some(code), None) => format!("[{code}]"),
+            (None, None) => "[unknown]".to_owned(),
+        }
     }
 }
 
