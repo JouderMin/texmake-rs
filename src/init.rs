@@ -31,6 +31,7 @@ use std::path::Path;
 
 use anyhow::Context;
 
+use crate::config::FILE_NAME;
 use crate::engine::Engine;
 use crate::error::usage;
 use crate::prompt;
@@ -245,11 +246,7 @@ fn create_project(
     }
     let files = planned_files(&answers);
     if opts.dry_run {
-        if !opts.quiet {
-            for (label, _) in &files {
-                println!("would create {label}");
-            }
-        }
+        print_would_create(&files, opts.quiet);
         return Ok(());
     }
     write_project(dir, &files, opts, writer)
@@ -264,20 +261,26 @@ fn create_workspace(
 ) -> anyhow::Result<()> {
     let files = workspace_files();
     if opts.dry_run {
-        if !opts.quiet {
-            for (label, _) in &files {
-                println!("would create {label}");
-            }
-        }
+        print_would_create(&files, opts.quiet);
         return Ok(());
     }
     write_project(dir, &files, opts, writer)
 }
 
+/// Report the files a dry run would create, in reporting order.
+fn print_would_create(files: &[(&'static str, String)], quiet: bool) {
+    if quiet {
+        return;
+    }
+    for (label, _) in files {
+        println!("would create {label}");
+    }
+}
+
 /// The files a workspace root is made of, in reporting order.
 fn workspace_files() -> [(&'static str, String); 2] {
     [
-        ("texmake.toml", "[workspace]\nmembers = []\n".to_owned()),
+        (FILE_NAME, "[workspace]\nmembers = []\n".to_owned()),
         (".gitignore", "/build/\n".to_owned()),
     ]
 }
@@ -285,10 +288,7 @@ fn workspace_files() -> [(&'static str, String); 2] {
 /// The files `init` creates, in reporting order.
 fn planned_files(answers: &prompt::Answers) -> [(&'static str, String); 3] {
     [
-        (
-            "texmake.toml",
-            config_template(&answers.name, answers.engine),
-        ),
+        (FILE_NAME, config_template(&answers.name, answers.engine)),
         ("main.tex", main_template(answers)),
         (".gitignore", "/build/\n".to_owned()),
     ]
@@ -306,12 +306,13 @@ fn write_project(
     opts: &InitOptions,
     writer: &dyn Fn(&Path, &str) -> io::Result<()>,
 ) -> anyhow::Result<()> {
-    // Write the configuration last.
-    let mut order: Vec<&(&'static str, String)> = files.iter().collect();
-    order.sort_by_key(|(label, _)| *label == "texmake.toml");
+    // Write the configuration last, so a failure never leaves a configuration
+    // without the document files it describes.
+    let (config, documents): (Vec<_>, Vec<_>) =
+        files.iter().partition(|(label, _)| *label == FILE_NAME);
     let mut created = Vec::new();
     let outcome = (|| -> anyhow::Result<()> {
-        for (label, content) in &order {
+        for (label, content) in documents.iter().chain(config.iter()) {
             let path = dir.join(label);
             match writer(&path, content) {
                 Ok(()) => {
