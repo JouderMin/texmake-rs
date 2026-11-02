@@ -38,6 +38,7 @@ mod test_support;
 mod up_to_date;
 mod validate;
 mod vars;
+mod workspace;
 
 fn main() {
     std::process::exit(cli::run());

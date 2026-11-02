@@ -32,7 +32,8 @@ use crate::config::{self, LoadedConfig, LoadedWorkspace};
 use crate::error::Error;
 use crate::init;
 use crate::recipe;
-use crate::validate::{self, Project, WorkspaceMember};
+use crate::validate::{self, Project};
+use crate::workspace::{self, WorkspaceMember};
 
 /// texmake: a make-like build tool for LaTeX document projects.
 #[derive(Debug, Parser)]
@@ -207,9 +208,9 @@ fn for_each_member(
     loaded: &LoadedWorkspace,
     mut action: impl FnMut(&WorkspaceMember) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let workspace = validate::build_workspace(loaded).map_err(Error::from)?;
+    let workspace = workspace::build_workspace(loaded).map_err(Error::from)?;
     require_members(&workspace)?;
-    for member in validate::select_members(&workspace, &cli.project)? {
+    for member in workspace::select_members(&workspace, &cli.project)? {
         heading(cli, &member.display);
         action(member)?;
     }
@@ -234,7 +235,7 @@ fn heading(cli: &Cli, member: &str) {
 }
 
 /// Reject a workspace that lists no members.
-fn require_members(workspace: &validate::Workspace) -> anyhow::Result<()> {
+fn require_members(workspace: &workspace::Workspace) -> anyhow::Result<()> {
     if workspace.members.is_empty() {
         return Err(crate::error::usage(format!(
             "workspace `{}` has no members",
