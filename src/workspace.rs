@@ -20,11 +20,11 @@
 //! members are resolved relative to the root, validated as independent
 //! projects, and selected by `[project] name` with `-p`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::config::{FILE_NAME, LoadedConfig, LoadedWorkspace};
+use crate::config::{FILE_NAME, LoadedConfig, LoadedProject, LoadedWorkspace};
 use crate::error::{ConfigError, Error};
 use crate::paths;
 use crate::validate::{Project, build_plan};
@@ -64,130 +64,149 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
         )
     })?;
     let mut members = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut names: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for indexed in loaded.workspace.members.get_ref() {
         let display = indexed.get_ref().clone();
-        let at = indexed.span();
-        if display.is_empty() {
-            return Err(loaded
-                .file
-                .error_at(at, "a workspace member path cannot be empty"));
-        }
-        let relative = Path::new(&display);
-        if relative.is_absolute() {
-            return Err(loaded.file.error_at(
-                at,
-                format!("workspace member `{display}` must be a relative path"),
-            ));
-        }
-        let dir = paths::normalize(&root.join(relative));
-        if dir == root || !dir.starts_with(&root) {
-            return Err(loaded.file.error_at(
-                at,
-                format!("workspace member `{display}` must stay inside the workspace root"),
-            ));
-        }
-        if !seen.insert(dir.clone()) {
-            return Err(loaded
-                .file
-                .error_at(at, format!("duplicate workspace member `{display}`")));
-        }
-        // Resolve symlinks before trusting the member: a link can point out of
-        // the workspace, and a dangling or looping link cannot be validated.
-        let resolved = dir.canonicalize().map_err(|error| {
-            loaded.file.error_at(
-                at.clone(),
-                format!(
-                    "workspace member `{display}`: cannot resolve `{}`: {error}",
-                    dir.display()
-                ),
-            )
-        })?;
-        if resolved == root {
-            return Err(loaded.file.error_at(
-                at,
-                format!(
-                    "workspace member `{display}`: `{}` is the workspace root",
-                    resolved.display()
-                ),
-            ));
-        }
-        if !resolved.starts_with(&root) {
-            return Err(loaded.file.error_at(
-                at,
-                format!(
-                    "workspace member `{display}`: `{}` resolves outside the workspace root",
-                    resolved.display()
-                ),
-            ));
-        }
-        if !resolved.is_dir() {
-            return Err(loaded.file.error_at(
-                at,
-                format!("workspace member `{display}` is not a directory"),
-            ));
-        }
-        let config_path = resolved.join(FILE_NAME);
-        if !config_path.is_file() {
-            return Err(loaded.file.error_at(
-                at,
-                format!("workspace member `{display}` has no {FILE_NAME}"),
-            ));
-        }
-        let config_path = config_path.canonicalize().map_err(|error| {
-            loaded.file.error_at(
-                at.clone(),
-                format!(
-                    "workspace member `{display}`: cannot resolve `{}`: {error}",
-                    config_path.display()
-                ),
-            )
-        })?;
-        if config_path == root || !config_path.starts_with(&root) {
-            return Err(loaded.file.error_at(
-                at,
-                format!(
-                    "workspace member `{display}`: `{}` resolves outside the workspace root",
-                    config_path.display()
-                ),
-            ));
-        }
-        let config = crate::config::load(&config_path)
-            .map_err(|error| member_error(loaded, at.clone(), &display, &error))?;
-        let member = match config {
-            LoadedConfig::Project(project) => project,
-            LoadedConfig::Workspace(nested) => {
-                let reason = nested.file.error_at(
-                    nested.workspace.members.span(),
-                    "nested workspaces are not supported",
-                );
-                return Err(loaded
-                    .file
-                    .error_at(at, format!("member {display}: {reason}")));
-            }
+        let context = MemberContext {
+            loaded,
+            root: &root,
+            display: &display,
+            at: indexed.span(),
         };
-        let project = build_plan(&member).map_err(|reason| {
-            loaded
-                .file
-                .error_at(at.clone(), format!("member {display}: {reason}"))
-        })?;
+        let dir = context.member_dir()?;
+        if !seen.insert(dir.clone()) {
+            return Err(context.fail(format!("duplicate workspace member `{display}`")));
+        }
+        let project = context.load_project(&dir)?;
         if let Some(previous) = names.insert(project.name.clone(), project.config_path.clone()) {
-            return Err(loaded.file.error_at(
-                at,
-                format!(
-                    "workspace has duplicate project name `{}`: {}, {}",
-                    project.name,
-                    previous.display(),
-                    project.config_path.display()
-                ),
-            ));
+            return Err(context.fail(format!(
+                "workspace has duplicate project name `{}`: {}, {}",
+                project.name,
+                previous.display(),
+                project.config_path.display()
+            )));
         }
         members.push(WorkspaceMember { display, project });
     }
 
     Ok(Workspace { root, members })
+}
+
+/// One `members` entry while it is validated, with the root it must stay in.
+struct MemberContext<'a> {
+    loaded: &'a LoadedWorkspace,
+    root: &'a Path,
+    display: &'a str,
+    at: Range<usize>,
+}
+
+impl MemberContext<'_> {
+    /// A positioned error about this member.
+    fn fail(&self, reason: String) -> ConfigError {
+        self.loaded.file.error_at(self.at.clone(), reason)
+    }
+
+    /// Check the raw path and return it normalized, before symlink resolution.
+    fn member_dir(&self) -> Result<PathBuf, ConfigError> {
+        if self.display.is_empty() {
+            return Err(self.fail("a workspace member path cannot be empty".to_owned()));
+        }
+        let relative = Path::new(self.display);
+        if relative.is_absolute() {
+            return Err(self.fail(format!(
+                "workspace member `{}` must be a relative path",
+                self.display
+            )));
+        }
+        let dir = paths::normalize(&self.root.join(relative));
+        if dir.as_path() == self.root || !dir.starts_with(self.root) {
+            return Err(self.fail(format!(
+                "workspace member `{}` must stay inside the workspace root",
+                self.display
+            )));
+        }
+        Ok(dir)
+    }
+
+    /// Resolve the member directory and load the project it contains.
+    fn load_project(&self, dir: &Path) -> Result<Project, ConfigError> {
+        // Resolve symlinks before trusting the member: a link can point out of
+        // the workspace, and a dangling or looping link cannot be validated.
+        let resolved = dir
+            .canonicalize()
+            .map_err(|error| self.cannot_resolve(dir, error))?;
+        if resolved.as_path() == self.root {
+            return Err(self.fail(format!(
+                "workspace member `{}`: `{}` is the workspace root",
+                self.display,
+                resolved.display()
+            )));
+        }
+        if !resolved.starts_with(self.root) {
+            return Err(self.fail(format!(
+                "workspace member `{}`: `{}` resolves outside the workspace root",
+                self.display,
+                resolved.display()
+            )));
+        }
+        if !resolved.is_dir() {
+            return Err(self.fail(format!(
+                "workspace member `{}` is not a directory",
+                self.display
+            )));
+        }
+        let config_path = resolved.join(FILE_NAME);
+        if !config_path.is_file() {
+            return Err(self.fail(format!(
+                "workspace member `{}` has no {FILE_NAME}",
+                self.display
+            )));
+        }
+        let config_path = config_path
+            .canonicalize()
+            .map_err(|error| self.cannot_resolve(&config_path, error))?;
+        if config_path.as_path() == self.root || !config_path.starts_with(self.root) {
+            return Err(self.fail(format!(
+                "workspace member `{}`: `{}` resolves outside the workspace root",
+                self.display,
+                config_path.display()
+            )));
+        }
+        let member = self.read_project(&config_path)?;
+        build_plan(&member).map_err(|reason| self.member_fail(&reason))
+    }
+
+    /// Load the member configuration, rejecting a nested workspace.
+    fn read_project(&self, config_path: &Path) -> Result<LoadedProject, ConfigError> {
+        let config = crate::config::load(config_path)
+            .map_err(|error| member_error(self.loaded, self.at.clone(), self.display, &error))?;
+        match config {
+            LoadedConfig::Project(project) => Ok(project),
+            LoadedConfig::Workspace(nested) => {
+                let reason = nested.file.error_at(
+                    nested.workspace.members.span(),
+                    "nested workspaces are not supported",
+                );
+                Err(self.member_fail(&reason))
+            }
+        }
+    }
+
+    /// A positioned `member {name}: {reason}` error.
+    fn member_fail(&self, reason: &impl std::fmt::Display) -> ConfigError {
+        self.fail(format!("member {}: {reason}", self.display))
+    }
+
+    /// A `cannot resolve` error for `path`.
+    fn cannot_resolve(&self, path: &Path, error: std::io::Error) -> ConfigError {
+        self.fail(format!(
+            "workspace member `{}`: cannot resolve `{}`: {error}",
+            self.display,
+            path.display()
+        ))
+    }
 }
 
 /// Keep only the members selected by `-p`.
