@@ -835,4 +835,210 @@ mod tests {
         assert_eq!(project.root, tmp.path().canonicalize().unwrap());
         assert_eq!(project.recipes["a"].output_path, project.root.join("build"));
     }
+
+    // -----------------------------------------------------------------------
+    // Characterization: workspace member validation and `-p` selection
+    // -----------------------------------------------------------------------
+
+    fn load_workspace(dir: &Path, toml: &str) -> LoadedWorkspace {
+        let path = dir.join("texmake.toml");
+        std::fs::write(&path, toml).unwrap();
+        match crate::config::load(&path).unwrap() {
+            LoadedConfig::Workspace(workspace) => workspace,
+            LoadedConfig::Project(_) => panic!("expected a workspace configuration"),
+        }
+    }
+
+    fn write_project_file(dir: &Path, name: &str) {
+        std::fs::write(dir.join("main.tex"), "").unwrap();
+        std::fs::write(
+            dir.join("texmake.toml"),
+            format!(
+                "[project]\nname = \"{name}\"\nmain = \"main.tex\"\n\
+                 [recipes.release]\nsteps = [{{ latex = \"xelatex\" }}]\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn two_member_workspace(dir: &Path) -> Workspace {
+        for name in ["paper", "slides"] {
+            std::fs::create_dir(dir.join(name)).unwrap();
+            write_project_file(&dir.join(name), name);
+        }
+        let loaded = load_workspace(dir, "[workspace]\nmembers = [\"paper\", \"slides\"]\n");
+        build_workspace(&loaded).unwrap()
+    }
+
+    #[test]
+    fn workspace_members_are_checked_in_listed_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_workspace(tmp.path(), "[workspace]\nmembers = [\"\", \"/abs\"]\n");
+        let error = build_workspace(&loaded).unwrap_err().to_string();
+        assert!(error.contains("cannot be empty"), "{error}");
+
+        let loaded = load_workspace(tmp.path(), "[workspace]\nmembers = [\"/abs\", \"\"]\n");
+        let error = build_workspace(&loaded).unwrap_err().to_string();
+        assert!(error.contains("must be a relative path"), "{error}");
+    }
+
+    #[test]
+    fn a_workspace_member_must_stay_inside_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_workspace(tmp.path(), "[workspace]\nmembers = [\"..\"]\n");
+        let error = build_workspace(&loaded).unwrap_err().to_string();
+        assert!(
+            error.contains("must stay inside the workspace root"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_workspace_member_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("paper")).unwrap();
+        write_project_file(&tmp.path().join("paper"), "paper");
+        let loaded = load_workspace(
+            tmp.path(),
+            "[workspace]\nmembers = [\"paper\", \"./paper\"]\n",
+        );
+        let error = build_workspace(&loaded).unwrap_err().to_string();
+        assert!(
+            error.contains("duplicate workspace member `./paper`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_member_without_a_configuration_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("paper")).unwrap();
+        let loaded = load_workspace(tmp.path(), "[workspace]\nmembers = [\"paper\"]\n");
+        let error = build_workspace(&loaded).unwrap_err().to_string();
+        assert!(
+            error.contains("workspace member `paper` has no texmake.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_broken_member_configuration_is_prefixed_with_the_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("paper")).unwrap();
+        std::fs::write(
+            tmp.path().join("paper/texmake.toml"),
+            "not toml at all = = =",
+        )
+        .unwrap();
+        let loaded = load_workspace(tmp.path(), "[workspace]\nmembers = [\"paper\"]\n");
+        let error = build_workspace(&loaded).unwrap_err().to_string();
+        assert!(error.contains("member paper: "), "{error}");
+    }
+
+    #[test]
+    fn select_members_keeps_every_member_without_a_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = two_member_workspace(tmp.path());
+        let selected = select_members(&workspace, &[]).unwrap();
+        let names: Vec<_> = selected
+            .iter()
+            .map(|member| member.display.clone())
+            .collect();
+        assert_eq!(names, ["paper", "slides"]);
+    }
+
+    #[test]
+    fn select_members_keeps_the_member_order_of_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = two_member_workspace(tmp.path());
+        let selected =
+            select_members(&workspace, &["slides".to_owned(), "paper".to_owned()]).unwrap();
+        let names: Vec<_> = selected
+            .iter()
+            .map(|member| member.display.clone())
+            .collect();
+        assert_eq!(names, ["paper", "slides"]);
+    }
+
+    #[test]
+    fn select_members_selects_a_repeated_name_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = two_member_workspace(tmp.path());
+        let selected =
+            select_members(&workspace, &["paper".to_owned(), "paper".to_owned()]).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display, "paper");
+    }
+
+    #[test]
+    fn select_members_reports_unknown_names_with_the_available_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = two_member_workspace(tmp.path());
+        let error = select_members(&workspace, &["ghost".to_owned()]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(
+            error.to_string(),
+            "error: unknown project `ghost`: available: paper, slides"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Characterization: step validation messages
+    // -----------------------------------------------------------------------
+
+    fn step_config(toml: &str) -> ConfigError {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.tex"), "").unwrap();
+        let loaded = load_config(tmp.path(), toml);
+        build_plan(&loaded).unwrap_err()
+    }
+
+    #[test]
+    fn a_step_must_have_exactly_one_action_key() {
+        let error = step_config(
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+             [recipes.a]\nsteps = [{ latex = \"xelatex\", biber = true }]\n",
+        )
+        .to_string();
+        assert!(
+            error.contains(
+                "a step must have exactly one action key \
+                 (latex, biber, bibtex, makeindex, run, tool); found 2"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_boolean_step_action_must_be_true() {
+        let error = step_config(
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+             [recipes.a]\nsteps = [{ biber = false }]\n",
+        )
+        .to_string();
+        assert!(error.contains("`biber` must be `true`"), "{error}");
+    }
+
+    #[test]
+    fn run_steps_reject_args() {
+        let error = step_config(
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+             [recipes.a]\nsteps = [{ run = \"sh gen.sh\", args = [\"x\"] }]\n",
+        )
+        .to_string();
+        assert!(
+            error.contains("`run` steps take the whole command; `args` is not allowed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_is_reported() {
+        let error = step_config(
+            "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+             [recipes.a]\nsteps = [{ tool = \"ghost\" }]\n",
+        )
+        .to_string();
+        assert!(error.contains("unknown tool `ghost`"), "{error}");
+    }
 }
