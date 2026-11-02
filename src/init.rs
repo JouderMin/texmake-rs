@@ -422,6 +422,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::prompt::Answers;
+    use crate::test_support::FakePrompter;
 
     fn answers(doc_type: DocType, engine: Engine, font: Font, ctex: bool) -> Answers {
         Answers {
@@ -504,7 +505,7 @@ mod tests {
 
     #[test]
     fn computer_modern_with_chinese_is_rejected() {
-        let mut prompter = FakePrompter::new(
+        let mut prompter = FakePrompter::with_answers(
             DocType::Article,
             Engine::Pdflatex,
             Font::ComputerModern,
@@ -521,7 +522,7 @@ mod tests {
     #[test]
     fn a_cancelled_question_removes_the_created_directory() {
         let mut prompter =
-            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+            FakePrompter::with_answers(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         prompter.fail_at = Some("engine");
         let dir = tempfile::tempdir().unwrap();
         let error = run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file)
@@ -536,7 +537,7 @@ mod tests {
     #[test]
     fn a_write_failure_removes_the_created_directory() {
         let mut prompter =
-            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+            FakePrompter::with_answers(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         let dir = tempfile::tempdir().unwrap();
         let writer = |path: &Path, content: &str| {
             if path.ends_with(".gitignore") {
@@ -555,7 +556,8 @@ mod tests {
 
     #[test]
     fn writes_the_project_described_by_the_answers() {
-        let mut prompter = FakePrompter::new(DocType::Book, Engine::Xelatex, Font::Concrete, false);
+        let mut prompter =
+            FakePrompter::with_answers(DocType::Book, Engine::Xelatex, Font::Concrete, false);
         let dir = tempfile::tempdir().unwrap();
         run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect("project");
         let project = dir.path().join("thesis");
@@ -576,7 +578,7 @@ mod tests {
     #[test]
     fn an_existing_directory_is_refused_before_asking_layout() {
         let mut prompter =
-            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+            FakePrompter::with_answers(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("thesis")).unwrap();
         let error =
@@ -588,7 +590,7 @@ mod tests {
     #[test]
     fn a_workspace_gets_a_root_configuration_and_no_document() {
         let mut prompter =
-            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+            FakePrompter::with_answers(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         prompter.project_type = ProjectType::Workspace;
         let dir = tempfile::tempdir().unwrap();
         run_init_in(&mut prompter, &quiet(), dir.path(), &write_new_file).expect("workspace");
@@ -608,7 +610,7 @@ mod tests {
     #[test]
     fn a_workspace_dry_run_writes_nothing() {
         let mut prompter =
-            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+            FakePrompter::with_answers(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         prompter.project_type = ProjectType::Workspace;
         let dir = tempfile::tempdir().unwrap();
         let opts = InitOptions {
@@ -622,7 +624,7 @@ mod tests {
     #[test]
     fn cancelling_the_project_type_creates_nothing() {
         let mut prompter =
-            FakePrompter::new(DocType::Article, Engine::Xelatex, Font::Concrete, false);
+            FakePrompter::with_answers(DocType::Article, Engine::Xelatex, Font::Concrete, false);
         prompter.project_type = ProjectType::Workspace;
         prompter.fail_at = Some("type");
         let dir = tempfile::tempdir().unwrap();
@@ -638,7 +640,7 @@ mod tests {
 
     #[test]
     fn dry_run_prints_the_planned_files_and_writes_nothing() {
-        let mut prompter = FakePrompter::new(
+        let mut prompter = FakePrompter::with_answers(
             DocType::Article,
             Engine::Lualatex,
             Font::NewComputerModern,
@@ -693,76 +695,6 @@ mod tests {
         InitOptions {
             dry_run: false,
             quiet: true,
-        }
-    }
-
-    struct FakePrompter {
-        calls: Vec<&'static str>,
-        fail_at: Option<&'static str>,
-        project_type: ProjectType,
-        doc_type: DocType,
-        engine: Engine,
-        font: Font,
-        ctex: bool,
-    }
-
-    impl FakePrompter {
-        fn new(doc_type: DocType, engine: Engine, font: Font, ctex: bool) -> Self {
-            Self {
-                calls: Vec::new(),
-                fail_at: None,
-                project_type: ProjectType::Project,
-                doc_type,
-                engine,
-                font,
-                ctex,
-            }
-        }
-    }
-
-    impl prompt::Prompter for FakePrompter {
-        fn ask_project_type(&mut self, _default: ProjectType) -> anyhow::Result<ProjectType> {
-            self.calls.push("type");
-            self.fail_if("type")?;
-            Ok(self.project_type)
-        }
-
-        fn ask_name(&mut self, _default: &str) -> anyhow::Result<String> {
-            self.calls.push("name");
-            Ok("thesis".to_owned())
-        }
-
-        fn ask_doc_type(&mut self, _default: DocType) -> anyhow::Result<DocType> {
-            self.calls.push("doc_type");
-            self.fail_if("doc_type")?;
-            Ok(self.doc_type)
-        }
-
-        fn ask_engine(&mut self, _default: Engine) -> anyhow::Result<Engine> {
-            self.calls.push("engine");
-            self.fail_if("engine")?;
-            Ok(self.engine)
-        }
-
-        fn ask_font(&mut self, _engine: Engine, _default: Font) -> anyhow::Result<Font> {
-            self.calls.push("font");
-            self.fail_if("font")?;
-            Ok(self.font)
-        }
-
-        fn ask_ctex(&mut self, _default: bool) -> anyhow::Result<bool> {
-            self.calls.push("ctex");
-            self.fail_if("ctex")?;
-            Ok(self.ctex)
-        }
-    }
-
-    impl FakePrompter {
-        fn fail_if(&self, step: &'static str) -> anyhow::Result<()> {
-            if self.fail_at == Some(step) {
-                return Err(Error::Cancelled.into());
-            }
-            Ok(())
         }
     }
 }

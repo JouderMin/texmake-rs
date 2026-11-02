@@ -33,6 +33,8 @@ mod init;
 mod paths;
 mod prompt;
 mod recipe;
+#[cfg(test)]
+mod test_support;
 mod up_to_date;
 mod validate;
 mod vars;
