@@ -48,43 +48,40 @@ fn ctex_options() -> [&'static str; 2] {
 }
 
 /// The engine choices, in display order.
-fn engine_choices() -> Vec<Engine> {
-    vec![Engine::Pdflatex, Engine::Xelatex, Engine::Lualatex]
+fn engine_choices() -> &'static [Engine] {
+    const ENGINES: [Engine; 3] = [Engine::Pdflatex, Engine::Xelatex, Engine::Lualatex];
+    &ENGINES
+}
+
+/// The starting cursor of a select prompt listing `options`: the index of
+/// `default`, or the first choice when `options` does not contain it.
+fn cursor<T: PartialEq>(options: &[T], default: T) -> usize {
+    options
+        .iter()
+        .position(|option| *option == default)
+        .unwrap_or(0)
 }
 
 /// The starting cursor of the project type prompt for `default`.
 fn project_type_cursor(default: ProjectType) -> usize {
-    match default {
-        ProjectType::Project => 0,
-        ProjectType::Workspace => 1,
-    }
+    cursor(&ProjectType::OPTIONS, default)
 }
 
 /// The starting cursor of the document type prompt for `default`.
 fn doc_type_cursor(default: DocType) -> usize {
-    match default {
-        DocType::Article => 0,
-        DocType::Book => 1,
-    }
+    cursor(&DocType::OPTIONS, default)
 }
 
 /// The starting cursor of the engine prompt for `default`.
 fn engine_cursor(default: Engine) -> usize {
-    match default {
-        Engine::Pdflatex => 0,
-        Engine::Xelatex => 1,
-        Engine::Lualatex => 2,
-    }
+    cursor(engine_choices(), default)
 }
 
 /// The starting cursor of the font prompt for `default`.
 ///
 /// A font that is not offered for `engine` falls back to the first choice.
 fn font_cursor(engine: Engine, default: Font) -> usize {
-    font_options(engine)
-        .iter()
-        .position(|font| *font == default)
-        .unwrap_or(0)
+    cursor(font_options(engine), default)
 }
 
 /// The starting cursor of the Chinese support prompt for `default`.
@@ -144,7 +141,7 @@ impl Prompter for InquirePrompter {
     }
 
     fn ask_engine(&mut self, default: Engine) -> anyhow::Result<Engine> {
-        Select::new(ENGINE_PROMPT, engine_choices())
+        Select::new(ENGINE_PROMPT, engine_choices().to_vec())
             .with_starting_cursor(engine_cursor(default))
             .prompt()
             .map_err(cancelled)
