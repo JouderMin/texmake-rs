@@ -69,6 +69,14 @@ pub struct Recipe {
     pub steps: Vec<Step>,
 }
 
+impl Recipe {
+    /// `{output}/{main_stem}`: the base path `biber` and `bibtex` are pointed
+    /// at, and the built PDF path without its `.pdf` extension.
+    pub fn stem_path(&self) -> String {
+        format!("{}/{}", self.output, self.main_stem)
+    }
+}
+
 /// One validated build step.
 #[derive(Debug)]
 pub enum Step {

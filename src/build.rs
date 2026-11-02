@@ -95,7 +95,7 @@ pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> any
         run_step(&mut log, &log_path, step, exec, &program, opts.verbose)?;
     }
     if !opts.quiet {
-        println!("Built {}/{}.pdf", recipe.output, recipe.main_stem);
+        println!("Built {}.pdf", recipe.stem_path());
     }
     Ok(())
 }

@@ -104,49 +104,37 @@ pub fn resolve_steps(project: &Project, recipe: &Recipe) -> Vec<ResolvedStep> {
 fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
     match step {
         Step::Latex { engine, args } => {
-            let mut argv = Vec::with_capacity(args.len() + 5);
-            argv.push("-interaction=nonstopmode".to_owned());
-            argv.push("-halt-on-error".to_owned());
-            argv.push("-file-line-error".to_owned());
-            argv.push(format!("-output-directory={}", recipe.output));
+            let mut argv = vec![
+                "-interaction=nonstopmode".to_owned(),
+                "-halt-on-error".to_owned(),
+                "-file-line-error".to_owned(),
+                format!("-output-directory={}", recipe.output),
+            ];
             argv.extend(args.iter().cloned());
             argv.push(recipe.main.clone());
-            executable(
-                Cow::Borrowed(engine.command()),
-                argv,
-                root.to_path_buf(),
-                true,
-            )
+            executable(Cow::Borrowed(engine.command()), argv, root, true)
         }
-        Step::Biber { args } => {
-            let mut argv = Vec::with_capacity(args.len() + 1);
-            argv.extend(args.iter().cloned());
-            argv.push(format!("{}/{}", recipe.output, recipe.main_stem));
-            executable(Cow::Borrowed("biber"), argv, root.to_path_buf(), true)
-        }
-        Step::Bibtex { args } => {
-            let mut argv = Vec::with_capacity(args.len() + 1);
-            argv.extend(args.iter().cloned());
-            argv.push(format!("{}/{}", recipe.output, recipe.main_stem));
-            executable(Cow::Borrowed("bibtex"), argv, root.to_path_buf(), true)
-        }
-        Step::Makeindex { args } => {
-            let mut argv = Vec::with_capacity(args.len() + 1);
-            argv.extend(args.iter().cloned());
-            argv.push(recipe.main_stem.clone());
-            executable(
-                Cow::Borrowed("makeindex"),
-                argv,
-                recipe.output_path.clone(),
-                true,
-            )
-        }
-        Step::Tool { command, args } => executable(
-            Cow::Owned(command.clone()),
-            args.clone(),
-            root.to_path_buf(),
+        Step::Biber { args } => executable(
+            Cow::Borrowed("biber"),
+            args_ending_with(args, recipe.stem_path()),
+            root,
             true,
         ),
+        Step::Bibtex { args } => executable(
+            Cow::Borrowed("bibtex"),
+            args_ending_with(args, recipe.stem_path()),
+            root,
+            true,
+        ),
+        Step::Makeindex { args } => executable(
+            Cow::Borrowed("makeindex"),
+            args_ending_with(args, recipe.main_stem.clone()),
+            &recipe.output_path,
+            true,
+        ),
+        Step::Tool { command, args } => {
+            executable(Cow::Owned(command.clone()), args.clone(), root, true)
+        }
         Step::Run { command } => {
             let (program, flag) = shell();
             ResolvedStep {
@@ -160,6 +148,14 @@ fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
             }
         }
     }
+}
+
+/// Copy `args` and append one trailing argument.
+fn args_ending_with(args: &[String], trailing: String) -> Vec<String> {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.extend(args.iter().cloned());
+    argv.push(trailing);
+    argv
 }
 
 /// The system shell and the flag that makes it run a command string.
@@ -178,7 +174,7 @@ fn shell() -> (&'static str, &'static str) {
 fn executable(
     program: Cow<'static, str>,
     args: Vec<String>,
-    cwd: PathBuf,
+    cwd: impl Into<PathBuf>,
     check_tool: bool,
 ) -> ResolvedStep {
     let display = display_command(program.as_ref(), &args);
@@ -187,7 +183,7 @@ fn executable(
         exec: ExecSpec {
             program,
             args,
-            cwd,
+            cwd: cwd.into(),
             check_tool,
         },
     }
