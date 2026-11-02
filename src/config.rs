@@ -49,15 +49,29 @@ pub enum LoadedConfig {
     Workspace(LoadedWorkspace),
 }
 
-/// A parsed project configuration.
+/// The configuration file a project or workspace was read from.
 #[derive(Debug)]
-pub struct LoadedProject {
+pub struct SourceFile {
     /// Absolute path of the configuration file.
     pub path: PathBuf,
-    /// Project root: the directory that contains the configuration file.
+    /// Root directory: the one that contains the configuration file.
     pub root: PathBuf,
     /// File contents; kept so spans can be turned into line/column pairs.
     pub source: String,
+}
+
+impl SourceFile {
+    /// Build a semantic configuration error pointing at `span`.
+    pub fn error_at(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
+        semantic(&self.path, &self.source, span, reason)
+    }
+}
+
+/// A parsed project configuration.
+#[derive(Debug)]
+pub struct LoadedProject {
+    /// The file it was read from.
+    pub file: SourceFile,
     /// Parsed project configuration with source spans preserved.
     pub raw: RawProjectConfig,
 }
@@ -65,12 +79,8 @@ pub struct LoadedProject {
 /// A parsed workspace-root configuration.
 #[derive(Debug)]
 pub struct LoadedWorkspace {
-    /// Absolute path of the configuration file.
-    pub path: PathBuf,
-    /// Workspace root: the directory that contains the configuration file.
-    pub root: PathBuf,
-    /// File contents; kept so spans can be turned into line/column pairs.
-    pub source: String,
+    /// The file it was read from.
+    pub file: SourceFile,
     /// The `[workspace]` table.
     pub workspace: RawWorkspace,
 }
@@ -296,25 +306,20 @@ pub fn load(path: &Path) -> anyhow::Result<LoadedConfig> {
         _ => PathBuf::from("."),
     };
 
+    let source_file = SourceFile { path, root, source };
     match (file.project, file.workspace) {
-        (Some(_), Some(workspace)) => Err(Error::Config(semantic(
-            &path,
-            &source,
+        (Some(_), Some(workspace)) => Err(Error::Config(source_file.error_at(
             workspace.members.span(),
             "a configuration cannot define both `[project]` and `[workspace]`",
         ))
         .into()),
-        (None, None) => Err(Error::Config(semantic(
-            &path,
-            &source,
+        (None, None) => Err(Error::Config(source_file.error_at(
             0..0,
             "the configuration must define `[project]` or `[workspace]`",
         ))
         .into()),
         (Some(project), None) => Ok(LoadedConfig::Project(LoadedProject {
-            path,
-            root,
-            source,
+            file: source_file,
             raw: RawProjectConfig {
                 project,
                 recipes: file.recipes,
@@ -323,27 +328,21 @@ pub fn load(path: &Path) -> anyhow::Result<LoadedConfig> {
         })),
         (None, Some(workspace)) => {
             if !file.recipes.is_empty() {
-                return Err(Error::Config(semantic(
-                    &path,
-                    &source,
+                return Err(Error::Config(source_file.error_at(
                     workspace.members.span(),
                     "a workspace root cannot define `recipes`",
                 ))
                 .into());
             }
             if !file.tools.is_empty() {
-                return Err(Error::Config(semantic(
-                    &path,
-                    &source,
+                return Err(Error::Config(source_file.error_at(
                     workspace.members.span(),
                     "a workspace root cannot define `tools`",
                 ))
                 .into());
             }
             Ok(LoadedConfig::Workspace(LoadedWorkspace {
-                path,
-                root,
-                source,
+                file: source_file,
                 workspace,
             }))
         }
@@ -356,23 +355,6 @@ fn absolute(path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
-    }
-}
-
-impl LoadedProject {
-    /// Build a semantic configuration error pointing at `span`.
-    ///
-    /// Span offsets come from [`Spanned`] values and are resolved against
-    /// [`LoadedProject::source`] so callers never compute line numbers.
-    pub fn error_at(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
-        semantic(&self.path, &self.source, span, reason)
-    }
-}
-
-impl LoadedWorkspace {
-    /// Build a semantic configuration error pointing at `span`.
-    pub fn error_at(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
-        semantic(&self.path, &self.source, span, reason)
     }
 }
 
@@ -477,8 +459,8 @@ mod tests {
         .unwrap();
 
         let loaded = load_project(&path);
-        assert_eq!(loaded.path, path);
-        assert_eq!(loaded.root, tmp.path());
+        assert_eq!(loaded.file.path, path);
+        assert_eq!(loaded.file.root, tmp.path());
         assert_eq!(loaded.raw.project.name.get_ref(), "thesis");
         assert_eq!(
             loaded.raw.recipes["release"]
@@ -494,7 +476,7 @@ mod tests {
             "xelatex"
         );
         let span = loaded.raw.project.name.span();
-        assert_eq!(&loaded.source[span], "\"thesis\"");
+        assert_eq!(&loaded.file.source[span], "\"thesis\"");
     }
     #[test]
     fn loads_tool_shorthand_and_table() {
@@ -546,11 +528,11 @@ mod tests {
             LoadedConfig::Workspace(loaded) => loaded,
             LoadedConfig::Project(_) => panic!("expected a workspace"),
         };
-        assert_eq!(loaded.path, path);
-        assert_eq!(loaded.root, tmp.path());
+        assert_eq!(loaded.file.path, path);
+        assert_eq!(loaded.file.root, tmp.path());
         let members = loaded.workspace.members.get_ref();
         assert_eq!(members[0].get_ref(), "paper");
-        assert_eq!(&loaded.source[members[1].span()], "\"slides\"");
+        assert_eq!(&loaded.file.source[members[1].span()], "\"slides\"");
     }
 
     #[test]
@@ -608,7 +590,9 @@ mod tests {
         std::fs::write(&path, "[project]\nname = \"thesis\"\nmain = \"main.tex\"\n").unwrap();
 
         let loaded = load_project(&path);
-        let error = loaded.error_at(loaded.raw.project.name.span(), "bad name");
+        let error = loaded
+            .file
+            .error_at(loaded.raw.project.name.span(), "bad name");
         assert_eq!(
             error.to_string(),
             format!("{}:2:8: error: bad name", path.display())

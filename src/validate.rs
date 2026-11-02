@@ -144,13 +144,13 @@ struct ToolSpec {
 ///
 /// Errors carry the file, line and column of the offending value.
 pub fn build_plan(loaded: &LoadedProject) -> Result<Project, ConfigError> {
-    let root = paths::normalize(&loaded.root);
+    let root = paths::normalize(&loaded.file.root);
     let root = root.canonicalize().unwrap_or(root);
 
     let tools = parse_tools(loaded)?;
 
     if loaded.raw.recipes.is_empty() {
-        return Err(loaded.error_at(
+        return Err(loaded.file.error_at(
             loaded.raw.project.main.span(),
             "the configuration defines no recipes",
         ));
@@ -171,7 +171,7 @@ pub fn build_plan(loaded: &LoadedProject) -> Result<Project, ConfigError> {
     if let Some(default) = &loaded.raw.project.default
         && !loaded.raw.recipes.contains_key(default.get_ref())
     {
-        return Err(loaded.error_at(
+        return Err(loaded.file.error_at(
             default.span(),
             format!("the default recipe `{}` is not defined", default.get_ref()),
         ));
@@ -187,7 +187,7 @@ pub fn build_plan(loaded: &LoadedProject) -> Result<Project, ConfigError> {
 
     Ok(Project {
         root,
-        config_path: loaded.path.clone(),
+        config_path: loaded.file.path.clone(),
         name: project_name,
         default: loaded
             .raw
@@ -225,7 +225,9 @@ fn build_recipe(
             .steps
             .as_ref()
             .map_or_else(|| main_span.span(), |steps| steps.span());
-        return Err(loaded.error_at(span, format!("recipe `{name}` has no `steps`")));
+        return Err(loaded
+            .file
+            .error_at(span, format!("recipe `{name}` has no `steps`")));
     };
 
     let main = main_span.get_ref().clone();
@@ -235,7 +237,7 @@ fn build_recipe(
     let output =
         output_span.map_or_else(|| DEFAULT_OUTPUT.to_owned(), |span| span.get_ref().clone());
     let output_path = paths::validate_output(project.root, &output, &main).map_err(|reason| {
-        loaded.error_at(
+        loaded.file.error_at(
             output_span.map_or_else(|| main_span.span(), Spanned::span),
             reason,
         )
@@ -317,19 +319,19 @@ fn validate_main(
     let direct_child =
         matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
     if !direct_child {
-        return Err(loaded.error_at(
+        return Err(loaded.file.error_at(
             span,
             format!("the main document `{main}` must be a direct child of the project root"),
         ));
     }
     if path.extension().and_then(|extension| extension.to_str()) != Some("tex") {
-        return Err(loaded.error_at(
+        return Err(loaded.file.error_at(
             span,
             format!("the main document `{main}` must have a `.tex` extension"),
         ));
     }
     if !root.join(main).is_file() {
-        return Err(loaded.error_at(
+        return Err(loaded.file.error_at(
             span,
             format!(
                 "the main document `{main}` does not exist in {}",
@@ -358,7 +360,7 @@ fn build_step(
     ];
     let action_count = actions.iter().filter(|present| **present).count();
     if action_count != 1 {
-        return Err(loaded.error_at(
+        return Err(loaded.file.error_at(
             raw_step.span(),
             format!(
                 "a step must have exactly one action key \
@@ -373,7 +375,7 @@ fn build_step(
         let engine = latex
             .get_ref()
             .parse::<Engine>()
-            .map_err(|reason| loaded.error_at(latex.span(), reason))?;
+            .map_err(|reason| loaded.file.error_at(latex.span(), reason))?;
         return Ok(Step::Latex {
             engine,
             args: render_args(loaded, vars, extra_args)?,
@@ -403,7 +405,7 @@ fn build_step(
 
     if let Some(run) = &raw.run {
         if raw.args.is_some() {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 run.span(),
                 "`run` steps take the whole command; `args` is not allowed",
             ));
@@ -418,7 +420,7 @@ fn build_step(
         .as_ref()
         .expect("exactly one action key is present");
     let tool = tools.get(tool_name.get_ref()).ok_or_else(|| {
-        loaded.error_at(
+        loaded.file.error_at(
             tool_name.span(),
             format!("unknown tool `{}`", tool_name.get_ref()),
         )
@@ -465,7 +467,7 @@ fn render_at(
     is_run: bool,
     span: Range<usize>,
 ) -> Result<String, ConfigError> {
-    vars::render(template, vars, is_run).map_err(|reason| loaded.error_at(span, reason))
+    vars::render(template, vars, is_run).map_err(|reason| loaded.file.error_at(span, reason))
 }
 
 /// Require a `biber`/`bibtex`/`makeindex` value to be `true`.
@@ -477,7 +479,9 @@ fn ensure_true(
     if *value.get_ref() {
         Ok(())
     } else {
-        Err(loaded.error_at(value.span(), format!("`{key}` must be `true`")))
+        Err(loaded
+            .file
+            .error_at(value.span(), format!("`{key}` must be `true`")))
     }
 }
 
@@ -498,7 +502,7 @@ fn parse_tools(loaded: &LoadedProject) -> Result<BTreeMap<String, ToolSpec>, Con
                 args: args.clone().unwrap_or_default(),
             },
             RawTool::Table { command: None, .. } => {
-                return Err(loaded.error_at(
+                return Err(loaded.file.error_at(
                     spanned.span(),
                     format!("tool `{name}` is missing `command`"),
                 ));
@@ -537,8 +541,8 @@ pub struct WorkspaceMember {
 /// positioned error.
 pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigError> {
     let span = loaded.workspace.members.span();
-    let root = loaded.root.canonicalize().map_err(|error| {
-        loaded.error_at(
+    let root = loaded.file.root.canonicalize().map_err(|error| {
+        loaded.file.error_at(
             span.clone(),
             format!("cannot resolve the workspace root: {error}"),
         )
@@ -551,29 +555,33 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
         let display = indexed.get_ref().clone();
         let at = indexed.span();
         if display.is_empty() {
-            return Err(loaded.error_at(at, "a workspace member path cannot be empty"));
+            return Err(loaded
+                .file
+                .error_at(at, "a workspace member path cannot be empty"));
         }
         let relative = Path::new(&display);
         if relative.is_absolute() {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!("workspace member `{display}` must be a relative path"),
             ));
         }
         let dir = paths::normalize(&root.join(relative));
         if dir == root || !dir.starts_with(&root) {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!("workspace member `{display}` must stay inside the workspace root"),
             ));
         }
         if !seen.insert(dir.clone()) {
-            return Err(loaded.error_at(at, format!("duplicate workspace member `{display}`")));
+            return Err(loaded
+                .file
+                .error_at(at, format!("duplicate workspace member `{display}`")));
         }
         // Resolve symlinks before trusting the member: a link can point out of
         // the workspace, and a dangling or looping link cannot be validated.
         let resolved = dir.canonicalize().map_err(|error| {
-            loaded.error_at(
+            loaded.file.error_at(
                 at.clone(),
                 format!(
                     "workspace member `{display}`: cannot resolve `{}`: {error}",
@@ -582,7 +590,7 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
             )
         })?;
         if resolved == root {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!(
                     "workspace member `{display}`: `{}` is the workspace root",
@@ -591,7 +599,7 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
             ));
         }
         if !resolved.starts_with(&root) {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!(
                     "workspace member `{display}`: `{}` resolves outside the workspace root",
@@ -600,20 +608,20 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
             ));
         }
         if !resolved.is_dir() {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!("workspace member `{display}` is not a directory"),
             ));
         }
         let config_path = resolved.join(FILE_NAME);
         if !config_path.is_file() {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!("workspace member `{display}` has no {FILE_NAME}"),
             ));
         }
         let config_path = config_path.canonicalize().map_err(|error| {
-            loaded.error_at(
+            loaded.file.error_at(
                 at.clone(),
                 format!(
                     "workspace member `{display}`: cannot resolve `{}`: {error}",
@@ -622,7 +630,7 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
             )
         })?;
         if config_path == root || !config_path.starts_with(&root) {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!(
                     "workspace member `{display}`: `{}` resolves outside the workspace root",
@@ -635,17 +643,22 @@ pub fn build_workspace(loaded: &LoadedWorkspace) -> Result<Workspace, ConfigErro
         let member = match config {
             LoadedConfig::Project(project) => project,
             LoadedConfig::Workspace(nested) => {
-                let reason = nested.error_at(
+                let reason = nested.file.error_at(
                     nested.workspace.members.span(),
                     "nested workspaces are not supported",
                 );
-                return Err(loaded.error_at(at, format!("member {display}: {reason}")));
+                return Err(loaded
+                    .file
+                    .error_at(at, format!("member {display}: {reason}")));
             }
         };
-        let project = build_plan(&member)
-            .map_err(|reason| loaded.error_at(at.clone(), format!("member {display}: {reason}")))?;
+        let project = build_plan(&member).map_err(|reason| {
+            loaded
+                .file
+                .error_at(at.clone(), format!("member {display}: {reason}"))
+        })?;
         if let Some(previous) = names.insert(project.name.clone(), project.config_path.clone()) {
-            return Err(loaded.error_at(
+            return Err(loaded.file.error_at(
                 at,
                 format!(
                     "workspace has duplicate project name `{}`: {}, {}",
@@ -706,10 +719,12 @@ fn member_error(
     error: &anyhow::Error,
 ) -> ConfigError {
     match error.downcast_ref::<crate::error::Error>() {
-        Some(crate::error::Error::Config(config)) => {
-            loaded.error_at(span, format!("member {display}: {config}"))
-        }
-        _ => loaded.error_at(span, format!("member {display}: {error}")),
+        Some(crate::error::Error::Config(config)) => loaded
+            .file
+            .error_at(span, format!("member {display}: {config}")),
+        _ => loaded
+            .file
+            .error_at(span, format!("member {display}: {error}")),
     }
 }
 
