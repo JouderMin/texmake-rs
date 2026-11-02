@@ -380,25 +380,37 @@ fn build_step(
         });
     }
 
-    if let Some(biber) = &raw.biber {
-        ensure_true(loaded, biber, "biber")?;
-        return Ok(Step::Biber {
-            args: render_args(loaded, vars, extra_args)?,
-        });
+    if let Some(built) = flag_step(
+        loaded,
+        vars,
+        extra_args,
+        raw.biber.as_ref(),
+        "biber",
+        |args| Step::Biber { args },
+    ) {
+        return built;
     }
 
-    if let Some(bibtex) = &raw.bibtex {
-        ensure_true(loaded, bibtex, "bibtex")?;
-        return Ok(Step::Bibtex {
-            args: render_args(loaded, vars, extra_args)?,
-        });
+    if let Some(built) = flag_step(
+        loaded,
+        vars,
+        extra_args,
+        raw.bibtex.as_ref(),
+        "bibtex",
+        |args| Step::Bibtex { args },
+    ) {
+        return built;
     }
 
-    if let Some(makeindex) = &raw.makeindex {
-        ensure_true(loaded, makeindex, "makeindex")?;
-        return Ok(Step::Makeindex {
-            args: render_args(loaded, vars, extra_args)?,
-        });
+    if let Some(built) = flag_step(
+        loaded,
+        vars,
+        extra_args,
+        raw.makeindex.as_ref(),
+        "makeindex",
+        |args| Step::Makeindex { args },
+    ) {
+        return built;
     }
 
     if let Some(run) = &raw.run {
@@ -417,6 +429,34 @@ fn build_step(
         .tool
         .as_ref()
         .expect("exactly one action key is present");
+    tool_step(loaded, tools, vars, extra_args, tool_name)
+}
+
+/// Build a `biber`/`bibtex`/`makeindex` step when its flag is present: the flag
+/// must be `true` and the step takes the shared `args`.
+fn flag_step(
+    loaded: &LoadedProject,
+    vars: &Vars<'_>,
+    extra_args: &[Spanned<String>],
+    flag: Option<&Spanned<bool>>,
+    name: &str,
+    step: impl FnOnce(Vec<String>) -> Step,
+) -> Option<Result<Step, ConfigError>> {
+    flag.map(|flag| {
+        ensure_true(loaded, flag, name)?;
+        Ok(step(render_args(loaded, vars, extra_args)?))
+    })
+}
+
+/// Build the `tool` step named by `tool_name`, with the tool's own arguments
+/// followed by the step's shared `args`.
+fn tool_step(
+    loaded: &LoadedProject,
+    tools: &BTreeMap<String, ToolSpec>,
+    vars: &Vars<'_>,
+    extra_args: &[Spanned<String>],
+    tool_name: &Spanned<String>,
+) -> Result<Step, ConfigError> {
     let tool = tools.get(tool_name.get_ref()).ok_or_else(|| {
         loaded.file.error_at(
             tool_name.span(),
