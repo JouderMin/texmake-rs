@@ -31,6 +31,8 @@ use crate::validate::{Project, Recipe, Step};
 pub struct ResolvedStep {
     /// Command line shown by `--dry-run` and by failure reports.
     pub display: String,
+    /// Short `tool target` label for the build's progress line.
+    pub progress: String,
     /// Execution details read by the build.
     pub exec: ExecSpec,
 }
@@ -112,33 +114,47 @@ fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
             ];
             argv.extend(args.iter().cloned());
             argv.push(recipe.main.clone());
-            executable(Cow::Borrowed(engine.command()), argv, root, true)
+            executable(
+                Cow::Borrowed(engine.command()),
+                argv,
+                root,
+                true,
+                format!("{} {}", engine.command(), recipe.main_stem),
+            )
         }
         Step::Biber { args } => executable(
             Cow::Borrowed("biber"),
             args_ending_with(args, recipe.stem_path()),
             root,
             true,
+            format!("biber {}", recipe.main_stem),
         ),
         Step::Bibtex { args } => executable(
             Cow::Borrowed("bibtex"),
             args_ending_with(args, recipe.stem_path()),
             root,
             true,
+            format!("bibtex {}", recipe.main_stem),
         ),
         Step::Makeindex { args } => executable(
             Cow::Borrowed("makeindex"),
             args_ending_with(args, recipe.main_stem.clone()),
             &recipe.output_path,
             true,
+            format!("makeindex {}", recipe.main_stem),
         ),
-        Step::Tool { command, args } => {
-            executable(Cow::Owned(command.clone()), args.clone(), root, true)
-        }
+        Step::Tool { command, args } => executable(
+            Cow::Owned(command.clone()),
+            args.clone(),
+            root,
+            true,
+            format!("tool {command}"),
+        ),
         Step::Run { command } => {
             let (program, flag) = shell();
             ResolvedStep {
                 display: command.clone(),
+                progress: run_progress(command),
                 exec: ExecSpec {
                     program: Cow::Borrowed(program),
                     args: vec![flag.to_owned(), command.clone()],
@@ -147,6 +163,14 @@ fn resolve_step(root: &Path, recipe: &Recipe, step: &Step) -> ResolvedStep {
                 },
             }
         }
+    }
+}
+
+/// The progress label of a `run` step: `run` and the command's first word.
+fn run_progress(command: &str) -> String {
+    match command.split_whitespace().next() {
+        Some(word) => format!("run {word}"),
+        None => "run".to_owned(),
     }
 }
 
@@ -176,10 +200,12 @@ fn executable(
     args: Vec<String>,
     cwd: impl Into<PathBuf>,
     check_tool: bool,
+    progress: String,
 ) -> ResolvedStep {
     let display = display_command(program.as_ref(), &args);
     ResolvedStep {
         display,
+        progress,
         exec: ExecSpec {
             program,
             args,

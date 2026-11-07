@@ -606,6 +606,153 @@ fn build_runs_steps_and_writes_log() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Built"));
 }
 
+/// Assert that `stdout` has one line starting with `prefix` and closing with
+/// ` done (x.xs)`.
+#[cfg(unix)]
+fn assert_done_line(stdout: &str, prefix: &str) {
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing progress line {prefix:?} in: {stdout}"));
+    let rest = &line[prefix.len()..];
+    assert!(rest.starts_with(" done ("), "{line:?}");
+    assert!(rest.ends_with("s)"), "{line:?}");
+    assert_eq!(rest.matches('.').count(), 1, "one decimal place: {line:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn progress_numbers_steps_and_reports_elapsed_time() {
+    let f = Fixture::new();
+    fake_pdf_tool(&f);
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }, { latex = \"xelatex\" }]\n",
+    );
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_done_line(&stdout, "[1/2] xelatex main");
+    assert_done_line(&stdout, "[2/2] xelatex main");
+    let progress = stdout.find("[1/2]").unwrap();
+    let built = stdout.find("Built build/main.pdf").unwrap();
+    assert!(progress < built, "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn progress_labels_each_kind_of_step() {
+    let f = Fixture::new();
+    f.fake_tool(
+        "xelatex",
+        "#!/bin/sh\nmkdir -p build && touch build/main.pdf\n",
+    );
+    f.fake_tool("biber", "#!/bin/sh\nexit 0\n");
+    f.fake_tool("plantuml", "#!/bin/sh\nexit 0\n");
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\n\
+         [tools.uml]\ncommand = \"plantuml\"\n\n\
+         [recipes.release]\nsteps = [\n\
+         { latex = \"xelatex\" },\n\
+         { biber = true },\n\
+         { tool = \"uml\" },\n\
+         { run = \"plantuml -version\" },\n]\n",
+    );
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_done_line(&stdout, "[1/4] xelatex main");
+    assert_done_line(&stdout, "[2/4] biber main");
+    assert_done_line(&stdout, "[3/4] tool plantuml");
+    assert_done_line(&stdout, "[4/4] run plantuml");
+}
+
+#[cfg(unix)]
+#[test]
+fn progress_failure_ends_the_line_before_the_report() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\necho boom\nexit 1\n");
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }, { run = \"touch later.marker\" }]\n",
+    );
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("[1/2] xelatex main"))
+        .unwrap_or_else(|| panic!("missing failure progress line in: {stdout}"));
+    assert!(line.contains(" failed ("), "{line:?}");
+    assert!(line.ends_with("s)"), "{line:?}");
+    assert!(stdout.ends_with('\n'), "{stdout:?}");
+    assert!(!stdout.contains("error:"), "{stdout}");
+    assert!(!stdout.contains("[2/2]"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("error: step failed\n"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_suppresses_progress_lines() {
+    let f = Fixture::new();
+    fake_pdf_tool(&f);
+
+    let out = f.cmd().args(["-q", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_prints_no_progress_lines() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\nexit 0\n");
+
+    let out = f.cmd().args(["-n", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("done ("), "{stdout}");
+    assert!(!stdout.contains('['), "{stdout}");
+    assert!(stdout.contains("xelatex"), "{stdout}");
+}
+
+#[test]
+fn workspace_progress_restarts_numbering_per_member() {
+    let f = Fixture::new();
+    write_workspace(&f, &["paper", "slides"]);
+    write_member(&f, "paper", "paper");
+    write_member(&f, "slides", "slides");
+    f.write(
+        "paper/texmake.toml",
+        "[project]\nname = \"paper\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }, { latex = \"xelatex\" }]\n",
+    );
+    fake_pdf_tool(&f);
+
+    let out = f.cmd().arg("build").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_done_line(&stdout, "[1/2] xelatex main");
+    assert_done_line(&stdout, "[2/2] xelatex main");
+    assert_done_line(&stdout, "[1/1] xelatex main");
+    assert_eq!(stdout.matches("[1/2]").count(), 1, "{stdout}");
+    assert_eq!(stdout.matches("[2/2]").count(), 1, "{stdout}");
+}
+
 #[cfg(unix)]
 #[test]
 fn log_records_command_and_exit_code() {

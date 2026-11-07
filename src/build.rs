@@ -31,6 +31,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::error::{BuildFailed, Error, Termination};
 use crate::recipe::{self, ExecSpec, ResolvedStep};
@@ -63,6 +64,9 @@ pub struct BuildOptions {
 /// merged output to stdout as it arrives; the log still records the same
 /// lines.
 ///
+/// Unless `--quiet` is set, each step prints `[i/N] tool target` before it
+/// starts and appends ` done (x.xs)` or ` failed (x.xs)` when it ends.
+///
 /// # Errors
 ///
 /// Returns an I/O error with the failing path as context when the output
@@ -89,10 +93,14 @@ pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> any
         .with_context(|| format!("cannot write `{}`", log_path.display()))?;
     let steps = recipe::resolve_steps(project, recipe);
     check_tools(project, &steps)?;
-    for step in &steps {
+    for (index, step) in steps.iter().enumerate() {
+        start_progress(step, index + 1, steps.len(), opts.quiet, opts.verbose);
+        let started = Instant::now();
         let exec = &step.exec;
         let program = spawn_program(&project.root, exec);
-        run_step(&mut log, &log_path, step, exec, &program, opts.verbose)?;
+        let outcome = run_step(&mut log, &log_path, step, exec, &program, opts.verbose);
+        finish_progress(outcome.is_ok(), started.elapsed().as_secs_f64(), opts.quiet);
+        outcome?;
     }
     if !opts.quiet {
         println!("Built {}.pdf", recipe.stem_path());
@@ -208,6 +216,39 @@ fn check_tools(project: &Project, steps: &[ResolvedStep]) -> anyhow::Result<()> 
         Ok(())
     } else {
         Err(Error::ToolMissing(missing).into())
+    }
+}
+
+/// Print the progress prefix of step `index` of `total`, then flush it.
+///
+/// Without `--verbose` the line stays open so the completion suffix can be
+/// appended to the same line. With `--verbose` the step's output is streamed
+/// next, so the prefix is terminated before that output starts.
+fn start_progress(step: &ResolvedStep, index: usize, total: usize, quiet: bool, verbose: bool) {
+    if quiet {
+        return;
+    }
+    let line = format!("[{index}/{total}] {}", step.progress);
+    if verbose {
+        println!("{line}");
+    } else {
+        print!("{line}");
+    }
+    let _ = std::io::stdout().flush();
+}
+
+/// Append the outcome and elapsed time of a step to its progress line.
+///
+/// A failure suffix ends the line before the failure report is printed, so the
+/// report never continues an unfinished progress line.
+fn finish_progress(success: bool, elapsed: f64, quiet: bool) {
+    if quiet {
+        return;
+    }
+    if success {
+        println!(" done ({elapsed:.1}s)");
+    } else {
+        println!(" failed ({elapsed:.1}s)");
     }
 }
 
