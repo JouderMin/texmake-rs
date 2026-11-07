@@ -94,12 +94,19 @@ pub fn run_build(project: &Project, recipe: &Recipe, opts: &BuildOptions) -> any
     let steps = recipe::resolve_steps(project, recipe);
     check_tools(project, &steps)?;
     for (index, step) in steps.iter().enumerate() {
-        start_progress(step, index + 1, steps.len(), opts.quiet, opts.verbose);
+        let progress = format!("[{}/{}] {}", index + 1, steps.len(), step.progress);
+        start_progress(&progress, opts.quiet, opts.verbose);
         let started = Instant::now();
         let exec = &step.exec;
         let program = spawn_program(&project.root, exec);
         let outcome = run_step(&mut log, &log_path, step, exec, &program, opts.verbose);
-        finish_progress(outcome.is_ok(), started.elapsed().as_secs_f64(), opts.quiet);
+        finish_progress(
+            &progress,
+            outcome.is_ok(),
+            started.elapsed().as_secs_f64(),
+            opts.quiet,
+            opts.verbose,
+        );
         outcome?;
     }
     if !opts.quiet {
@@ -224,31 +231,35 @@ fn check_tools(project: &Project, steps: &[ResolvedStep]) -> anyhow::Result<()> 
 /// Without `--verbose` the line stays open so the completion suffix can be
 /// appended to the same line. With `--verbose` the step's output is streamed
 /// next, so the prefix is terminated before that output starts.
-fn start_progress(step: &ResolvedStep, index: usize, total: usize, quiet: bool, verbose: bool) {
+fn start_progress(prefix: &str, quiet: bool, verbose: bool) {
     if quiet {
         return;
     }
-    let line = format!("[{index}/{total}] {}", step.progress);
     if verbose {
-        println!("{line}");
+        println!("{prefix}");
     } else {
-        print!("{line}");
+        print!("{prefix}");
     }
     let _ = std::io::stdout().flush();
 }
 
 /// Append the outcome and elapsed time of a step to its progress line.
 ///
+/// Without `--verbose` the completion suffix is appended to the still-open
+/// prefix line. With `--verbose` the prefix was already terminated before the
+/// streamed output, so the whole line is printed again with its outcome.
+///
 /// A failure suffix ends the line before the failure report is printed, so the
 /// report never continues an unfinished progress line.
-fn finish_progress(success: bool, elapsed: f64, quiet: bool) {
+fn finish_progress(prefix: &str, success: bool, elapsed: f64, quiet: bool, verbose: bool) {
     if quiet {
         return;
     }
-    if success {
-        println!(" done ({elapsed:.1}s)");
+    let outcome = if success { "done" } else { "failed" };
+    if verbose {
+        println!("{prefix} {outcome} ({elapsed:.1}s)");
     } else {
-        println!(" failed ({elapsed:.1}s)");
+        println!(" {outcome} ({elapsed:.1}s)");
     }
 }
 

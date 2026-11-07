@@ -607,17 +607,18 @@ fn build_runs_steps_and_writes_log() {
 }
 
 /// Assert that `stdout` has one line starting with `prefix` and closing with
-/// ` done (x.xs)`.
+/// ` done (x.xs)`. With `-v` the prefix also appears on its own start line, so
+/// only completion lines are considered.
 #[cfg(unix)]
 fn assert_done_line(stdout: &str, prefix: &str) {
-    let line = stdout
+    let rest = stdout
         .lines()
-        .find(|line| line.starts_with(prefix))
+        .filter(|line| line.starts_with(prefix))
+        .map(|line| &line[prefix.len()..])
+        .find(|rest| rest.starts_with(" done ("))
         .unwrap_or_else(|| panic!("missing progress line {prefix:?} in: {stdout}"));
-    let rest = &line[prefix.len()..];
-    assert!(rest.starts_with(" done ("), "{line:?}");
-    assert!(rest.ends_with("s)"), "{line:?}");
-    assert_eq!(rest.matches('.').count(), 1, "one decimal place: {line:?}");
+    assert!(rest.ends_with("s)"), "{rest:?}");
+    assert_eq!(rest.matches('.').count(), 1, "one decimal place: {rest:?}");
 }
 
 #[cfg(unix)]
@@ -727,6 +728,53 @@ fn dry_run_prints_no_progress_lines() {
     assert!(!stdout.contains("done ("), "{stdout}");
     assert!(!stdout.contains('['), "{stdout}");
     assert!(stdout.contains("xelatex"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_progress_prints_a_complete_completion_line() {
+    let f = Fixture::new();
+    fake_pdf_tool(&f);
+    f.write_toml(
+        "[project]\nname = \"t\"\nmain = \"main.tex\"\n\
+         [recipes.release]\nsteps = [{ latex = \"xelatex\" }, { latex = \"xelatex\" }]\n",
+    );
+
+    let out = f.cmd().args(["-v", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_done_line(&stdout, "[1/2] xelatex main");
+    assert_done_line(&stdout, "[2/2] xelatex main");
+    assert!(
+        !stdout.lines().any(|line| line.starts_with(" done (")),
+        "no orphan completion line: {stdout}"
+    );
+    assert!(stdout.contains("$ xelatex"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_progress_prints_a_complete_failure_line() {
+    let f = Fixture::new();
+    f.fake_tool("xelatex", "#!/bin/sh\necho boom\nexit 1\n");
+
+    let out = f.cmd().args(["-v", "build"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .filter(|line| line.starts_with("[1/1] xelatex main"))
+        .find(|line| line.contains(" failed ("))
+        .unwrap_or_else(|| panic!("missing verbose failure progress line in: {stdout}"));
+    assert!(line.ends_with("s)"), "{line:?}");
+    assert!(
+        !stdout.lines().any(|line| line.starts_with(" failed (")),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("error: step failed\n"), "{stderr}");
 }
 
 #[test]
